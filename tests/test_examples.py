@@ -30,3 +30,12 @@ def test_tracking_smoothing_beats_raw():
     out = mod.run(seed=0)
     assert out["rmse_smoothed"] < out["rmse_raw"]
     assert out["rmse_smoothed"] < 0.5
+
+
+def test_integrated_tracks_and_avoids():
+    mod = importlib.import_module("examples.integrated_sim")
+    out = mod.run(frames=70, seed=0)
+    # Stayed clear of the moving obstacles (soft keep-out, small slack allowed)...
+    assert out["min_clearance"] > mod.SAFETY_RADIUS - 0.5
+    # ...and still reached the goal.
+    assert out["goal_dist"] < 2.0

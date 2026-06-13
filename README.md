@@ -139,6 +139,36 @@ Each prints a metric showing the factor-graph estimate beats the naive
 baseline (fused vs dead-reckoning, smoothed vs raw detections) and, with
 matplotlib, saves a plot.
 
+### Integrated demo: track obstacles, then avoid them with MPC
+
+```bash
+python examples/integrated_sim.py
+```
+
+Wires all three layers into one pipeline — **perception → prediction → control**:
+
+1. Moving obstacles emit noisy **detections** each frame.
+2. A constant-velocity **factor-graph tracker** smooths each obstacle and
+   **predicts** its position over the MPC horizon.
+3. `BicycleMPC` drives the ego car to a (clickable) goal while **avoiding** each
+   predicted obstacle trajectory via soft keep-out (control-barrier-style)
+   factors within `safety_radius`.
+
+This mirrors the tightly-coupled estimation+control idea behind JPCM/IPN_MPC,
+with FGO-MOT-style tracking feeding the obstacle predictions.
+
+`BicycleMPC.solve` / `control` / `simulate` accept an `obstacles` argument — a
+list of static centres `(2,)` or per-step predictions `(horizon+1, 2)`:
+
+```python
+preds = [predicted_obstacle_xy]            # shape (horizon+1, 2) from a tracker
+u = mpc.control(ego_state, goal, obstacles=preds)
+```
+
+> The avoidance is **soft** (a penalty/barrier factor), so it strongly avoids
+> but does not *guarantee* a hard minimum distance — see the note on hard
+> constraints below.
+
 ## Nonlinear bicycle MPC
 
 For the kinematic bicycle model
@@ -199,10 +229,10 @@ The suite validates the factor-graph solution against an independent finite-hori
   - `.simulate(x0, steps, xref=None) -> MPCResult` — closed-loop receding-horizon rollout.
 - **`MPCResult`** — `.states`, `.controls`, `.u0`.
 - **`BicycleModel(wheelbase, dt)`** — nonlinear kinematic bicycle; `.step`, `.jacobians`.
-- **`BicycleMPC(model, Q, R, horizon, Qf=None, a_bounds, delta_bounds, v_bounds, barrier_weight, max_iterations)`**
-  - `.solve(x0, xref, warm_start=True) -> MPCResult`
-  - `.control(x0, xref) -> np.ndarray`
-  - `.simulate(x0, xref, steps) -> MPCResult`
+- **`BicycleMPC(model, Q, R, horizon, Qf=None, a_bounds, delta_bounds, v_bounds, barrier_weight, safety_radius, obstacle_weight, max_iterations)`**
+  - `.solve(x0, xref, obstacles=None, warm_start=True) -> MPCResult`
+  - `.control(x0, xref, obstacles=None) -> np.ndarray`
+  - `.simulate(x0, xref, steps, obstacles=None) -> MPCResult`
   - `.reset()` — clear the cached warm-start solution.
 
 ## References

@@ -88,6 +88,22 @@ def test_at_goal_needs_little_control():
     assert np.linalg.norm(result.u0) < 1e-2
 
 
+def test_avoids_static_obstacle():
+    mpc = _default_mpc(v_bounds=(-2.0, 4.0), safety_radius=2.0, obstacle_weight=400.0)
+    goal = np.array([12.0, 0.0, 0.0, 0.0])
+    # Near the straight-line path but slightly off-axis (a symmetric obstacle
+    # dead-ahead is a potential-field local minimum; a tracker rarely reports
+    # one perfectly centred anyway).
+    obstacle = np.array([6.0, 0.8])
+    result = mpc.simulate(np.zeros(4), goal, steps=120, obstacles=[obstacle])
+
+    min_dist = np.min(np.linalg.norm(result.states[:, :2] - obstacle, axis=1))
+    # Soft keep-out: should stay close to the safety radius (small slack allowed).
+    assert min_dist > 2.0 - 0.4
+    # Still makes meaningful progress toward the goal past the obstacle.
+    assert result.states[-1, 0] > 9.0
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

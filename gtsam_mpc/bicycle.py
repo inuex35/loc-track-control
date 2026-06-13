@@ -122,6 +122,8 @@ class BicycleMPC:
         delta_bounds: tuple[float, float] = (-0.5, 0.5),
         v_bounds: tuple[float, float] | None = None,
         barrier_weight: float = 300.0,
+        safety_radius: float = 2.0,
+        obstacle_weight: float = 150.0,
         max_iterations: int = 100,
     ) -> None:
         if horizon < 1:
@@ -136,6 +138,8 @@ class BicycleMPC:
         self.u_upper = np.array([a_bounds[1], delta_bounds[1]])
         self.v_bounds = v_bounds
         self.barrier_weight = float(barrier_weight)
+        self.safety_radius = float(safety_radius)
+        self.obstacle_weight = float(obstacle_weight)
 
         self._params = gtsam.LevenbergMarquardtParams()
         self._params.setMaxIterations(int(max_iterations))
@@ -201,9 +205,54 @@ class BicycleMPC:
 
         return error
 
+    @staticmethod
+    def _avoid_error(p_obs: np.ndarray, radius: float):
+        """Soft keep-out: penalize being closer than ``radius`` to ``p_obs``.
+
+        This is the position control-barrier ``h(x) = ||p - p_obs||^2 - r^2 >= 0``
+        imposed softly: the residual is the depth of incursion into the keep-out
+        disk (zero outside it), so a stiff noise model pushes the trajectory out.
+        """
+        def error(this, values, H):
+            x = values.atVector(this.keys()[0])
+            d = x[:2] - p_obs
+            dist = float(np.hypot(d[0], d[1]))
+            if dist < radius:
+                if H is not None:
+                    grad = np.zeros((1, 4))
+                    if dist > 1e-6:
+                        grad[0, 0] = -d[0] / dist
+                        grad[0, 1] = -d[1] / dist
+                    H[0] = grad
+                return np.array([radius - dist])
+            if H is not None:
+                H[0] = np.zeros((1, 4))
+            return np.array([0.0])
+
+        return error
+
+    def _normalize_obstacles(self, obstacles) -> list[np.ndarray]:
+        """Each obstacle -> a (horizon+1, 2) array of predicted centre positions.
+
+        Accepts a single point ``(2,)`` (static), or a per-step prediction
+        ``(horizon+1, 2)``.
+        """
+        out = []
+        for obs in obstacles:
+            arr = np.asarray(obs, dtype=float)
+            if arr.shape == (2,):
+                arr = np.tile(arr, (self.horizon + 1, 1))
+            elif arr.shape != (self.horizon + 1, 2):
+                raise ValueError(
+                    f"obstacle must be shape (2,) or ({self.horizon + 1}, 2), "
+                    f"got {arr.shape}"
+                )
+            out.append(arr)
+        return out
+
     # --- graph construction ----------------------------------------------
     def _build_graph(
-        self, x0: np.ndarray, xref: np.ndarray
+        self, x0: np.ndarray, xref: np.ndarray, obstacles: list[np.ndarray] | None
     ) -> gtsam.NonlinearFactorGraph:
         N = self.horizon
         cost_x = gtsam.noiseModel.Gaussian.Information(self.Q)
@@ -212,6 +261,9 @@ class BicycleMPC:
         constraint = gtsam.noiseModel.Constrained.All(4)
         u_barrier = gtsam.noiseModel.Diagonal.Precisions(
             np.full(2, self.barrier_weight)
+        )
+        obs_barrier = gtsam.noiseModel.Diagonal.Precisions(
+            np.array([self.obstacle_weight])
         )
 
         graph = gtsam.NonlinearFactorGraph()
@@ -243,6 +295,16 @@ class BicycleMPC:
         graph.add(
             gtsam.CustomFactor(cost_xf, [X(N)], self._state_cost_error(xref))
         )
+
+        if obstacles:
+            for obs in obstacles:
+                for k in range(N + 1):
+                    graph.add(
+                        gtsam.CustomFactor(
+                            obs_barrier, [X(k)],
+                            self._avoid_error(obs[k], self.safety_radius),
+                        )
+                    )
         return graph
 
     def _rollout_init(self, x0: np.ndarray) -> gtsam.Values:
@@ -261,18 +323,26 @@ class BicycleMPC:
         self,
         x0: np.ndarray,
         xref: np.ndarray,
+        obstacles=None,
         warm_start: bool = True,
     ) -> MPCResult:
         """Optimize the trajectory from ``x0`` toward target state ``xref``.
 
-        Consecutive calls reuse the previous solution as the initial guess
-        (``warm_start=True``), which keeps re-optimization fast for closed-loop
-        / interactive use.
+        Args:
+            x0: Current state ``[x, y, theta, v]``.
+            xref: Target state.
+            obstacles: Optional iterable of obstacles to avoid. Each is either a
+                static centre ``(2,)`` or a per-horizon-step prediction
+                ``(horizon + 1, 2)`` (e.g. from a tracker). Avoidance is a soft
+                keep-out within ``safety_radius``.
+            warm_start: Reuse the previous solution as the initial guess, which
+                keeps re-optimization fast for closed-loop / interactive use.
         """
         x0 = np.asarray(x0, dtype=float).reshape(4)
         xref = np.asarray(xref, dtype=float).reshape(4)
+        obs = self._normalize_obstacles(obstacles) if obstacles else None
 
-        graph = self._build_graph(x0, xref)
+        graph = self._build_graph(x0, xref, obs)
         if warm_start and self._last_solution is not None:
             initial = self._last_solution
         else:
@@ -287,22 +357,27 @@ class BicycleMPC:
         controls = np.array([result.atVector(U(k)) for k in range(self.horizon)])
         return MPCResult(states=states, controls=controls)
 
-    def control(self, x0: np.ndarray, xref: np.ndarray) -> np.ndarray:
+    def control(self, x0: np.ndarray, xref: np.ndarray, obstacles=None) -> np.ndarray:
         """Return the first optimal control for ``x0`` (one receding-horizon step)."""
-        return self.solve(x0, xref).u0
+        return self.solve(x0, xref, obstacles=obstacles).u0
 
     def reset(self) -> None:
         """Forget the cached warm-start solution."""
         self._last_solution = None
 
-    def simulate(self, x0: np.ndarray, xref: np.ndarray, steps: int) -> MPCResult:
-        """Closed-loop receding-horizon rollout for ``steps`` steps toward ``xref``."""
+    def simulate(
+        self, x0: np.ndarray, xref: np.ndarray, steps: int, obstacles=None
+    ) -> MPCResult:
+        """Closed-loop receding-horizon rollout for ``steps`` steps toward ``xref``.
+
+        ``obstacles`` (static centres) are avoided at every step.
+        """
         x = np.asarray(x0, dtype=float).reshape(4)
         self.reset()
         states = [x.copy()]
         controls = []
         for _ in range(steps):
-            u = self.control(x, xref)
+            u = self.control(x, xref, obstacles=obstacles)
             x = self.model.step(x, u)
             controls.append(u)
             states.append(x.copy())
