@@ -1,8 +1,15 @@
 # gtsam-mpc
 
-Linear **Model Predictive Control (MPC)** formulated as **factor-graph optimization** and solved with [GTSAM](https://gtsam.org/).
+**Model Predictive Control (MPC)** formulated as **factor-graph optimization** and solved with [GTSAM](https://gtsam.org/).
 
 A finite-horizon linear-quadratic optimal control problem is mathematically equivalent to maximum-a-posteriori (MAP) inference on a Gaussian factor graph. This package builds that graph and lets GTSAM's sparse linear solver recover the optimal trajectory — eliminating the graph is the same computation as the classical Riccati recursion, but expressed declaratively as factors.
+
+Two solvers are provided:
+
+| Solver           | System                          | Graph            | Constraints |
+| ---------------- | ------------------------------- | ---------------- | ----------- |
+| `LinearMPC`      | linear (`A`, `B`)               | Gaussian (LQR)   | equality only (dynamics + initial state) |
+| `BicycleMPC`     | nonlinear kinematic bicycle     | nonlinear (LM)   | equality + **soft** input/speed limits (barrier factors) |
 
 ## The problem
 
@@ -102,6 +109,57 @@ A 2-D point mass chases a goal under receding-horizon MPC, with the predicted
 horizon plan drawn ahead of it. **Left click** sets a new goal, **space**
 pauses, **r** resets, **esc** quits.
 
+```bash
+python examples/bicycle_sim.py
+```
+
+A car (nonlinear kinematic bicycle model) drives to a clickable goal under
+`BicycleMPC`, with steering and acceleration enforced as soft limits. Same key
+bindings.
+
+## Nonlinear bicycle MPC
+
+For the kinematic bicycle model
+
+```
+ẋ = v·cos θ,   ẏ = v·sin θ,   θ̇ = (v/L)·tan δ,   v̇ = a
+state = [x, y, θ, v],   control = [a, δ]
+```
+
+`BicycleMPC` builds a **nonlinear** factor graph: the discretized dynamics and
+costs are `gtsam.CustomFactor` factors with analytic Jacobians, optimized with
+Levenberg-Marquardt (warm-started between calls). Input limits `|a| ≤ a_max`,
+`|δ| ≤ δ_max` and optional speed limits are added as **soft barrier factors** —
+a one-sided quadratic penalty, zero inside the feasible box and growing with the
+violation, whose stiffness is set by `barrier_weight`.
+
+```python
+import numpy as np
+from gtsam_mpc import BicycleMPC, BicycleModel
+
+mpc = BicycleMPC(
+    BicycleModel(wheelbase=2.5, dt=0.1),
+    Q=np.diag([3.0, 3.0, 0.8, 0.4]),     # x, y, heading, speed
+    R=np.diag([0.1, 0.1]),               # accel, steering
+    horizon=25,
+    Qf=np.diag([30.0, 30.0, 3.0, 3.0]),
+    a_bounds=(-3.0, 3.0),
+    delta_bounds=(-0.6, 0.6),
+    v_bounds=(-3.0, 8.0),
+    barrier_weight=500.0,
+)
+
+x0 = np.array([0.0, 0.0, 0.0, 0.0])      # [x, y, theta, v]
+goal = np.array([10.0, 4.0, 0.0, 0.0])
+u = mpc.control(x0, goal)                # first [a, delta] to apply
+traj = mpc.simulate(x0, goal, steps=120) # closed-loop rollout
+```
+
+> The soft barrier means inputs may slightly exceed the limits; raise
+> `barrier_weight` to tighten. The dynamics are nonlinear, so the predicted
+> trajectory satisfies them to a small numerical residual (the *applied*
+> closed-loop control uses the true model).
+
 ## Tests
 
 ```bash
@@ -118,6 +176,12 @@ The suite validates the factor-graph solution against an independent finite-hori
   - `.control(x0, xref=None) -> np.ndarray` — first optimal control (one receding-horizon step).
   - `.simulate(x0, steps, xref=None) -> MPCResult` — closed-loop receding-horizon rollout.
 - **`MPCResult`** — `.states`, `.controls`, `.u0`.
+- **`BicycleModel(wheelbase, dt)`** — nonlinear kinematic bicycle; `.step`, `.jacobians`.
+- **`BicycleMPC(model, Q, R, horizon, Qf=None, a_bounds, delta_bounds, v_bounds, barrier_weight, max_iterations)`**
+  - `.solve(x0, xref, warm_start=True) -> MPCResult`
+  - `.control(x0, xref) -> np.ndarray`
+  - `.simulate(x0, xref, steps) -> MPCResult`
+  - `.reset()` — clear the cached warm-start solution.
 
 ## References
 
