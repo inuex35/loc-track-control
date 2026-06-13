@@ -117,6 +117,28 @@ A car (nonlinear kinematic bicycle model) drives to a clickable goal under
 `BicycleMPC`, with steering and acceleration enforced as soft limits. Same key
 bindings.
 
+## Three factor-graph layers: estimation, control, tracking
+
+The same idea — *write the problem as factors and find the MAP estimate* —
+spans an entire autonomy stack. `examples/` has one self-contained sample per
+layer, echoing three reference projects:
+
+| Sample | Layer | Factor graph | Reference project |
+| ------ | ----- | ------------ | ----------------- |
+| `examples/localization.py` | 位置推定 (estimation) | Pose2 odometry (`BetweenFactor`) + GPS (`PriorFactor`) fusion | JPCM / IPN_MPC (positioning half) |
+| `examples/control.py`      | 制御 (control)        | receding-horizon MPC (Gaussian / LQR) | this package, JPCM (control half) |
+| `examples/tracking.py`     | トラッキング (perception) | constant-velocity motion prior + position measurements | FGO-MOT |
+
+```bash
+python examples/localization.py   # odometry drifts; GPS fusion tracks truth
+python examples/control.py        # point-mass MPC drives to a goal
+python examples/tracking.py       # smooths noisy multi-object detections
+```
+
+Each prints a metric showing the factor-graph estimate beats the naive
+baseline (fused vs dead-reckoning, smoothed vs raw detections) and, with
+matplotlib, saves a plot.
+
 ## Nonlinear bicycle MPC
 
 For the kinematic bicycle model
