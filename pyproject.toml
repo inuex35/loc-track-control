@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gtsam-mpc"
+version = "0.1.0"
+description = "Linear Model Predictive Control as factor-graph optimization with GTSAM"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "inuex35" }]
+keywords = ["mpc", "gtsam", "factor-graph", "optimal-control", "lqr", "robotics"]
+dependencies = [
+    "gtsam>=4.2",
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+plot = ["matplotlib>=3.5"]
+
+[project.urls]
+Repository = "https://github.com/inuex35/gtsam-mpc"
+
+[tool.setuptools.packages.find]
+include = ["gtsam_mpc*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
