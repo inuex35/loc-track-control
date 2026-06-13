@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
 plot = ["matplotlib>=3.5"]
+sim = ["pygame>=2.1"]
 
 [project.urls]
 Repository = "https://github.com/inuex35/gtsam-mpc"

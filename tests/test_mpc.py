@@ -8,7 +8,7 @@ the two must agree to numerical precision.
 import numpy as np
 import pytest
 
-from gtsam_mpc import LinearMPC, LinearSystem, double_integrator
+from gtsam_mpc import LinearMPC, LinearSystem, double_integrator, point_mass_2d
 
 
 def finite_horizon_lqr(system, Q, R, Qf, x0, N):
@@ -83,6 +83,30 @@ def test_closed_loop_converges_to_origin():
     assert result.controls.shape == (80, 1)
     # The receding-horizon controller should regulate the state to the origin.
     assert np.linalg.norm(result.states[-1]) < 0.05
+
+
+def test_tracks_nonzero_goal():
+    system = point_mass_2d(dt=0.1)
+    mpc = LinearMPC(
+        system,
+        Q=np.diag([4.0, 4.0, 0.5, 0.5]),
+        R=np.diag([0.05, 0.05]),
+        horizon=30,
+        Qf=np.diag([40.0, 40.0, 4.0, 4.0]),
+    )
+    goal = np.array([3.0, -2.0, 0.0, 0.0])
+    result = mpc.simulate(np.zeros(4), steps=120, xref=goal)
+    # Closed loop should converge to the (equilibrium) goal.
+    np.testing.assert_allclose(result.states[-1], goal, atol=0.05)
+
+
+def test_reference_at_goal_needs_no_control():
+    system = point_mass_2d(dt=0.1)
+    mpc = LinearMPC(system, Q=np.eye(4), R=np.eye(2), horizon=10)
+    goal = np.array([2.0, 5.0, 0.0, 0.0])
+    # Already at the goal (an equilibrium): the plan should command ~zero input.
+    result = mpc.solve(goal, xref=goal)
+    np.testing.assert_allclose(result.controls, 0.0, atol=1e-9)
 
 
 def test_zero_initial_state_gives_zero_control():

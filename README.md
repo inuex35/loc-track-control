@@ -32,6 +32,7 @@ The MAP solution of the resulting Gaussian factor graph is exactly the optimal c
 pip install -e .          # core (gtsam, numpy)
 pip install -e ".[dev]"   # + pytest
 pip install -e ".[plot]"  # + matplotlib for the example plot
+pip install -e ".[sim]"   # + pygame for the interactive simulation
 ```
 
 ## Usage
@@ -63,6 +64,26 @@ u = mpc.control(x0)
 traj = mpc.simulate(x0, steps=60)
 ```
 
+### Tracking a goal
+
+Pass `xref` to regulate toward a target state instead of the origin (exact when
+`xref` is an equilibrium, e.g. a zero-velocity position goal):
+
+```python
+import numpy as np
+from gtsam_mpc import LinearMPC, point_mass_2d
+
+mpc = LinearMPC(
+    point_mass_2d(dt=0.1),                       # state = [px, py, vx, vy]
+    Q=np.diag([4.0, 4.0, 0.5, 0.5]),
+    R=np.diag([0.05, 0.05]),
+    horizon=30,
+    Qf=np.diag([40.0, 40.0, 4.0, 4.0]),
+)
+goal = np.array([3.0, -2.0, 0.0, 0.0])           # position goal, zero velocity
+u = mpc.control(np.zeros(4), xref=goal)
+```
+
 ## Example
 
 ```bash
@@ -70,6 +91,16 @@ python examples/double_integrator.py
 ```
 
 Drives a double integrator from `[5, 0]` to the origin and (if matplotlib is installed) saves `double_integrator.png`.
+
+### Interactive pygame simulation
+
+```bash
+python examples/pygame_sim.py
+```
+
+A 2-D point mass chases a goal under receding-horizon MPC, with the predicted
+horizon plan drawn ahead of it. **Left click** sets a new goal, **space**
+pauses, **r** resets, **esc** quits.
 
 ## Tests
 
@@ -81,11 +112,11 @@ The suite validates the factor-graph solution against an independent finite-hori
 
 ## API
 
-- **`LinearSystem(A, B)`** — discrete-time LTI system; `double_integrator(dt)` is a ready-made example.
+- **`LinearSystem(A, B)`** — discrete-time LTI system; `double_integrator(dt)` and `point_mass_2d(dt)` are ready-made examples.
 - **`LinearMPC(system, Q, R, horizon, Qf=None)`** — the solver.
-  - `.solve(x0) -> MPCResult` — open-loop optimal `states` / `controls`.
-  - `.control(x0) -> np.ndarray` — first optimal control (one receding-horizon step).
-  - `.simulate(x0, steps) -> MPCResult` — closed-loop receding-horizon rollout.
+  - `.solve(x0, xref=None) -> MPCResult` — open-loop optimal `states` / `controls`.
+  - `.control(x0, xref=None) -> np.ndarray` — first optimal control (one receding-horizon step).
+  - `.simulate(x0, steps, xref=None) -> MPCResult` — closed-loop receding-horizon rollout.
 - **`MPCResult`** — `.states`, `.controls`, `.u0`.
 
 ## References

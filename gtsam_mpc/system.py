@@ -57,3 +57,31 @@ def double_integrator(dt: float = 0.1) -> LinearSystem:
     A = np.array([[1.0, dt], [0.0, 1.0]])
     B = np.array([[0.5 * dt * dt], [dt]])
     return LinearSystem(A, B)
+
+
+def point_mass_2d(dt: float = 0.1) -> LinearSystem:
+    """A 2-D point mass (decoupled double integrators) at timestep ``dt``.
+
+    State is ``[px, py, vx, vy]`` and the control is acceleration
+    ``[ax, ay]``. Each axis is an independent double integrator, so a goal
+    ``[px, py, 0, 0]`` (any position, zero velocity) is an equilibrium and can
+    be tracked exactly by :class:`~gtsam_mpc.mpc.LinearMPC`.
+    """
+    A = np.array(
+        [
+            [1.0, 0.0, dt, 0.0],
+            [0.0, 1.0, 0.0, dt],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    half_dt2 = 0.5 * dt * dt
+    B = np.array(
+        [
+            [half_dt2, 0.0],
+            [0.0, half_dt2],
+            [dt, 0.0],
+            [0.0, dt],
+        ]
+    )
+    return LinearSystem(A, B)

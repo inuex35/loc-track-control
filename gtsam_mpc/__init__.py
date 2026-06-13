@@ -5,13 +5,14 @@ inference on a Gaussian factor graph and solves it with GTSAM.
 """
 
 from .mpc import LinearMPC, MPCResult
-from .system import LinearSystem, double_integrator
+from .system import LinearSystem, double_integrator, point_mass_2d
 
 __all__ = [
     "LinearMPC",
     "MPCResult",
     "LinearSystem",
     "double_integrator",
+    "point_mass_2d",
 ]
 
 __version__ = "0.1.0"

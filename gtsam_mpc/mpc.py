@@ -123,26 +123,52 @@ class LinearMPC:
         graph.add(X(N), np.eye(n), np.zeros(n), cost_xN)
         return graph
 
-    def solve(self, x0: np.ndarray) -> MPCResult:
-        """Solve the open-loop optimal-control problem from initial state ``x0``."""
+    def _reference(self, xref: np.ndarray | None) -> np.ndarray:
+        n = self.system.n_states
+        if xref is None:
+            return np.zeros(n)
+        return np.asarray(xref, dtype=float).reshape(n)
+
+    def solve(self, x0: np.ndarray, xref: np.ndarray | None = None) -> MPCResult:
+        """Solve the open-loop optimal-control problem from initial state ``x0``.
+
+        Args:
+            x0: Current state, shape ``(n,)``.
+            xref: Target state to regulate toward, shape ``(n,)``. Defaults to
+                the origin. The cost is applied to the tracking error
+                ``x - xref``; tracking is exact when ``xref`` is an equilibrium
+                of the system (``A xref = xref``), e.g. a zero-velocity goal for
+                a double integrator.
+        """
         n, m = self.system.n_states, self.system.n_controls
         x0 = np.asarray(x0, dtype=float).reshape(n)
+        xref = self._reference(xref)
 
-        solution = self._build_graph(x0).optimize()
+        # Regulate the error state e = x - xref toward zero, then shift back.
+        solution = self._build_graph(x0 - xref).optimize()
 
-        states = np.array([solution.at(X(k)) for k in range(self.horizon + 1)])
+        states = np.array(
+            [solution.at(X(k)) + xref for k in range(self.horizon + 1)]
+        )
         controls = np.array([solution.at(U(k)) for k in range(self.horizon)])
         return MPCResult(states=states, controls=controls.reshape(self.horizon, m))
 
-    def control(self, x0: np.ndarray) -> np.ndarray:
+    def control(self, x0: np.ndarray, xref: np.ndarray | None = None) -> np.ndarray:
         """Return the first optimal control for ``x0`` (one receding-horizon step)."""
-        return self.solve(x0).u0
+        return self.solve(x0, xref).u0
 
-    def simulate(self, x0: np.ndarray, steps: int) -> MPCResult:
+    def simulate(
+        self, x0: np.ndarray, steps: int, xref: np.ndarray | None = None
+    ) -> MPCResult:
         """Run the receding-horizon controller in closed loop for ``steps`` steps.
 
         At each step the full horizon is re-optimized from the current state and
         only the first control is applied to the (true) system dynamics.
+
+        Args:
+            x0: Initial state.
+            steps: Number of closed-loop steps to simulate.
+            xref: Target state to track (see :meth:`solve`).
 
         Returns:
             An :class:`MPCResult` with the realized closed-loop ``states``
@@ -155,7 +181,7 @@ class LinearMPC:
         states = [x.copy()]
         controls = []
         for _ in range(steps):
-            u = self.control(x)
+            u = self.control(x, xref)
             x = self.system.step(x, u)
             controls.append(u)
             states.append(x.copy())
