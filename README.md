@@ -169,6 +169,17 @@ u = mpc.control(ego_state, goal, obstacles=preds)
 > but does not *guarantee* a hard minimum distance — see the note on hard
 > constraints below.
 
+### Recording an animation (GIF)
+
+No display needed — render any of the pygame demos to an animated GIF:
+
+```bash
+python examples/make_gif.py integrated.gif --frames 90 --scale 0.6 --fps 20
+```
+
+This drives the integrated track-and-avoid demo headless and writes a GIF
+(handy for docs/CI where an interactive window isn't available).
+
 ## Nonlinear bicycle MPC
 
 For the kinematic bicycle model

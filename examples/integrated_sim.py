@@ -114,6 +114,49 @@ class Obstacle:
         self.history.append(self.state[:2] + rng.normal(0, 0.6, 2))
 
 
+def draw_scene(screen, font, ego, goal_xy, obstacles, predictions, plan,
+               paused: bool = False) -> None:
+    """Render one frame of the track-and-avoid scene (shared by sim and GIF)."""
+    screen.fill(bsim.BG)
+    bsim.draw_grid(screen)
+
+    for obs, pred in zip(obstacles, predictions):
+        for d in obs.history:
+            pygame.draw.circle(screen, DET_COLOR, bsim.world_to_screen(d), 2)
+        pred_pts = [bsim.world_to_screen(p) for p in pred]
+        if len(pred_pts) > 1:
+            pygame.draw.lines(screen, PRED_COLOR, False, pred_pts, 1)
+        c = bsim.world_to_screen(obs.state[:2])
+        pygame.draw.circle(screen, OBS_TRUE, c,
+                           int(OBS_DRAW_RADIUS * bsim.PIXELS_PER_METER))
+        pygame.draw.circle(screen, OBS_RING, c,
+                           int(SAFETY_RADIUS * bsim.PIXELS_PER_METER), 1)
+
+    plan_pts = [bsim.world_to_screen(s[:2]) for s in plan.states]
+    if len(plan_pts) > 1:
+        pygame.draw.lines(screen, bsim.PLAN_COLOR, False, plan_pts, 2)
+
+    gx, gy = bsim.world_to_screen(goal_xy)
+    pygame.draw.circle(screen, bsim.GOAL_COLOR, (gx, gy), 9, 2)
+
+    bsim.draw_car(screen, ego, float(plan.controls[0, 1]))
+
+    dist_goal = float(np.linalg.norm(ego[:2] - goal_xy))
+    min_obs = min(
+        (float(np.linalg.norm(ego[:2] - o.state[:2])) for o in obstacles),
+        default=float("inf"),
+    )
+    lines = [
+        f"ego=({ego[0]:+.1f},{ego[1]:+.1f}) v={ego[3]:+.2f}  goal dist={dist_goal:.1f}",
+        f"tracked obstacles={len(predictions)}  nearest={min_obs:.1f} m  "
+        f"(safety {SAFETY_RADIUS:.0f} m)",
+        "click: set goal   space: pause   r: reset   esc: quit"
+        + ("   [PAUSED]" if paused else ""),
+    ]
+    for i, text in enumerate(lines):
+        screen.blit(font.render(text, True, bsim.TEXT_COLOR), (10, 10 + i * 20))
+
+
 def run(frames: int = 70, seed: int = 0) -> dict:
     """Headless track-and-avoid rollout (no rendering) for testing/metrics."""
     rng = np.random.default_rng(seed)
@@ -206,53 +249,10 @@ def main() -> None:
         heading = np.arctan2(goal_xy[1] - ego[1], goal_xy[0] - ego[0])
         xref = np.array([goal_xy[0], goal_xy[1], heading, 0.0])
         plan = mpc.solve(ego, xref, obstacles=predictions)
-        last_delta = float(plan.controls[0, 1])
         if not paused:
             ego = model.step(ego, plan.u0)
 
-        # --- render ---
-        screen.fill(bsim.BG)
-        bsim.draw_grid(screen)
-
-        for obs, pred in zip(obstacles, predictions):
-            # detections
-            for d in obs.history:
-                pygame.draw.circle(screen, DET_COLOR, bsim.world_to_screen(d), 2)
-            # predicted future path
-            pred_pts = [bsim.world_to_screen(p) for p in pred]
-            if len(pred_pts) > 1:
-                pygame.draw.lines(screen, PRED_COLOR, False, pred_pts, 1)
-            # true obstacle + safety ring
-            c = bsim.world_to_screen(obs.state[:2])
-            pygame.draw.circle(screen, OBS_TRUE, c,
-                               int(OBS_DRAW_RADIUS * bsim.PIXELS_PER_METER))
-            pygame.draw.circle(screen, OBS_RING, c,
-                               int(SAFETY_RADIUS * bsim.PIXELS_PER_METER), 1)
-
-        plan_pts = [bsim.world_to_screen(s[:2]) for s in plan.states]
-        if len(plan_pts) > 1:
-            pygame.draw.lines(screen, bsim.PLAN_COLOR, False, plan_pts, 2)
-
-        gx, gy = bsim.world_to_screen(goal_xy)
-        pygame.draw.circle(screen, bsim.GOAL_COLOR, (gx, gy), 9, 2)
-
-        bsim.draw_car(screen, ego, last_delta)
-
-        dist_goal = float(np.linalg.norm(ego[:2] - goal_xy))
-        min_obs = min(
-            (float(np.linalg.norm(ego[:2] - o.state[:2])) for o in obstacles),
-            default=float("inf"),
-        )
-        lines = [
-            f"ego=({ego[0]:+.1f},{ego[1]:+.1f}) v={ego[3]:+.2f}  goal dist={dist_goal:.1f}",
-            f"tracked obstacles={len(predictions)}  nearest={min_obs:.1f} m  "
-            f"(safety {SAFETY_RADIUS:.0f} m)",
-            "click: set goal   space: pause   r: reset   esc: quit"
-            + ("   [PAUSED]" if paused else ""),
-        ]
-        for i, text in enumerate(lines):
-            screen.blit(font.render(text, True, bsim.TEXT_COLOR), (10, 10 + i * 20))
-
+        draw_scene(screen, font, ego, goal_xy, obstacles, predictions, plan, paused)
         pygame.display.flip()
         clock.tick(int(round(1.0 / DT)))
 

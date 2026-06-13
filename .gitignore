@@ -23,6 +23,8 @@ htmlcov/
 
 # Example outputs
 *.png
+*.gif
+*.mp4
 
 # Editors / OS
 .idea/
