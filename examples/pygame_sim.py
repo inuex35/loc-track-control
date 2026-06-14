@@ -20,15 +20,20 @@ and ``GTSAM_MPC_MAX_FRAMES=<n>`` to run ``n`` frames without a window.
 """
 
 import os
+import sys
 
 # The demo uses no sound; disable the audio backend so it runs cleanly on
 # headless machines without an audio device.
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import pygame
 
 from gtsam_mpc import LinearMPC, point_mass_2d
+from examples._viz import (
+    BG, GOAL_COLOR, TEXT_COLOR, View, max_frames_from_env,
+)
 
 # --- World / rendering configuration -------------------------------------
 WIDTH, HEIGHT = 900, 700
@@ -36,27 +41,13 @@ PIXELS_PER_METER = 30.0          # world (metres) -> screen (pixels)
 DT = 0.1                         # control / sim timestep [s]
 FPS = int(round(1.0 / DT))
 
-BG = (18, 18, 24)
-GRID = (38, 38, 48)
 POINT_COLOR = (80, 200, 255)
-GOAL_COLOR = (255, 120, 120)
-PLAN_COLOR = (90, 110, 140)
+PLAN_COLOR = (90, 110, 140)      # dimmer than the shared plan colour for points
 VEL_COLOR = (250, 220, 120)
-TEXT_COLOR = (210, 210, 220)
 
-
-def world_to_screen(p: np.ndarray) -> tuple[int, int]:
-    """Map a world position (metres, origin at centre, y up) to screen pixels."""
-    sx = WIDTH / 2 + p[0] * PIXELS_PER_METER
-    sy = HEIGHT / 2 - p[1] * PIXELS_PER_METER
-    return int(sx), int(sy)
-
-
-def screen_to_world(sx: float, sy: float) -> np.ndarray:
-    """Inverse of :func:`world_to_screen`."""
-    x = (sx - WIDTH / 2) / PIXELS_PER_METER
-    y = (HEIGHT / 2 - sy) / PIXELS_PER_METER
-    return np.array([x, y])
+_VIEW = View(WIDTH, HEIGHT, PIXELS_PER_METER)
+world_to_screen = _VIEW.world_to_screen
+screen_to_world = _VIEW.screen_to_world
 
 
 def make_controller() -> LinearMPC:
@@ -70,16 +61,11 @@ def make_controller() -> LinearMPC:
 
 
 def draw_grid(screen: pygame.Surface) -> None:
-    step = int(PIXELS_PER_METER)
-    for x in range(WIDTH // 2 % step, WIDTH, step):
-        pygame.draw.line(screen, GRID, (x, 0), (x, HEIGHT))
-    for y in range(HEIGHT // 2 % step, HEIGHT, step):
-        pygame.draw.line(screen, GRID, (0, y), (WIDTH, y))
+    _VIEW.draw_grid(screen, spacing_m=1.0)
 
 
 def main() -> None:
-    max_frames_env = os.environ.get("GTSAM_MPC_MAX_FRAMES")
-    max_frames = int(max_frames_env) if max_frames_env else None
+    max_frames = max_frames_from_env()
 
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))

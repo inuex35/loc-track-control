@@ -35,13 +35,19 @@ Runs headless for testing with ``SDL_VIDEODRIVER=dummy`` and
 """
 
 import os
+import sys
 
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import pygame
 
 from gtsam_mpc import BicycleMPC, BicycleModel
+from examples._viz import (
+    BG, GOAL_COLOR as TARGET_COLOR, PLAN_COLOR, TEXT_COLOR, TRAIL_COLOR,
+    View, draw_car as _draw_car, max_frames_from_env,
+)
 
 # --- World / rendering configuration -------------------------------------
 WIDTH, HEIGHT = 1000, 720
@@ -56,15 +62,7 @@ WHEELBASE = 2.5
 MPC_DT = 0.5
 MPC_HORIZON = 6                  # 6 * 0.5 s = 3 s prediction horizon
 
-BG = (18, 18, 24)
-GRID = (38, 38, 48)
-CAR_BODY = (80, 200, 255)
-WHEEL = (235, 235, 245)
-PATH_COLOR = (90, 90, 120)
-TARGET_COLOR = (255, 120, 120)
-PLAN_COLOR = (120, 200, 140)
-TEXT_COLOR = (210, 210, 220)
-TRAIL_COLOR = (60, 120, 90)
+PATH_COLOR = (90, 90, 120)       # demo-specific colours (rest come from _viz)
 
 A_BOUNDS = (-4.0, 4.0)
 DELTA_BOUNDS = (-0.6, 0.6)
@@ -73,16 +71,8 @@ V_BOUNDS = (-2.0, 14.0)
 PATH_RESOLUTION = 0.25            # arc-length spacing of resampled path [m]
 LAT_ACCEL_MAX = 3.0              # comfort lateral-accel limit for corner speed [m/s^2]
 
-
-def world_to_screen(p) -> tuple[int, int]:
-    sx = WIDTH / 2 + p[0] * PIXELS_PER_METER
-    sy = HEIGHT / 2 - p[1] * PIXELS_PER_METER
-    return int(sx), int(sy)
-
-
-def _rot(theta: float) -> np.ndarray:
-    c, s = np.cos(theta), np.sin(theta)
-    return np.array([[c, -s], [s, c]])
+_VIEW = View(WIDTH, HEIGHT, PIXELS_PER_METER)
+world_to_screen = _VIEW.world_to_screen
 
 
 # --- Reference paths ------------------------------------------------------
@@ -268,27 +258,7 @@ def reference_trajectory(path, curvature, near_idx, speed, horizon, dt):
 
 
 def draw_car(screen, state: np.ndarray, delta: float) -> None:
-    px, py, theta, _ = state
-    pos = np.array([px, py])
-    R = _rot(theta)
-    length, width = WHEELBASE + 1.0, 1.8
-    half = np.array([length / 2, width / 2])
-    corners = np.array([[-half[0], -half[1]], [half[0], -half[1]],
-                        [half[0], half[1]], [-half[0], half[1]]])
-    body = [world_to_screen(pos + R @ (c + np.array([length / 2 - 0.5, 0]))) for c in corners]
-    pygame.draw.polygon(screen, CAR_BODY, body)
-
-    def wheel(center_body, ang):
-        wl, ww = 0.7, 0.25
-        wr = _rot(theta + ang)
-        pts = np.array([[-wl, -ww], [wl, -ww], [wl, ww], [-wl, ww]])
-        screen_pts = [world_to_screen(pos + R @ center_body + wr @ p) for p in pts]
-        pygame.draw.polygon(screen, WHEEL, screen_pts)
-
-    wheel(np.array([0.0, width / 2]), 0.0)
-    wheel(np.array([0.0, -width / 2]), 0.0)
-    wheel(np.array([WHEELBASE, width / 2]), delta)
-    wheel(np.array([WHEELBASE, -width / 2]), delta)
+    _draw_car(screen, _VIEW, state, delta, WHEELBASE)
 
 
 def draw_path(screen, path: np.ndarray) -> None:
@@ -338,8 +308,7 @@ def draw_scene(surface, font, path, state, plan, refs,
 
 
 def main() -> None:
-    max_frames_env = os.environ.get("GTSAM_MPC_MAX_FRAMES")
-    max_frames = int(max_frames_env) if max_frames_env else None
+    max_frames = max_frames_from_env()
 
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
