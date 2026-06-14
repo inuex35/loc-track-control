@@ -36,6 +36,7 @@ from gtsam.symbol_shorthand import U, X
 
 from gtsam_mpc import BicycleMPC, BicycleModel
 import examples.path_following_sim as pf
+from examples._racecar_app import RacecarApp
 from examples.loc_control_sim import (
     MovingHorizonEstimator, GPS_SIGMAS, SPEED_SIGMA,
     TRUE_COLOR, EST_COLOR, GPS_COLOR, WINDOW_COLOR, TEXT_COLOR,
@@ -190,136 +191,50 @@ def run(seed=0, steps=300, gps_sigma=1.0, target_speed=8.0, path_gen=None):
     }
 
 
-def main():
-    max_frames_env = os.environ.get("GTSAM_MPC_MAX_FRAMES")
-    max_frames = int(max_frames_env) if max_frames_env else None
-    rng = np.random.default_rng(0)
+class JointApp(RacecarApp):
+    """Single-graph estimation+control: one optimize() per step."""
 
-    pygame.init()
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("gtsam-mpc: joint estimation + control (single graph)")
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont("monospace", 16)
+    caption = "gtsam-mpc: joint estimation + control (single graph)"
 
-    plant = BicycleModel(wheelbase=WHEELBASE, dt=DT)
-    gps_idx = 1
-    joint = JointEstimatorMPC(gps_sigma=GPS_SIGMAS[gps_idx])
+    def setup(self) -> None:
+        self.joint = JointEstimatorMPC(gps_sigma=GPS_SIGMAS[self.gps_idx])
+        self.u_cmd = np.zeros(2)
 
-    path_key = "1"
-    path_name, generator = pf.PATHS[path_key]
-    path = pf.make_path(generator)
-    curvature = pf.path_curvature(path)
-    target_speed = 8.0
-    paused = False
+    def set_gps_sigma(self, sigma: float) -> None:
+        self.joint.set_gps_sigma(sigma)
 
-    def reset_all():
-        nonlocal true_state, estimate, u_cmd, true_trail, est_trail, gps_pts, rmse_sq, nrmse
-        true_state = pf.reset_on_path(path, target_speed)
-        joint.reset(true_state)
-        estimate = true_state.copy()
-        u_cmd = np.zeros(2)
-        true_trail, est_trail, gps_pts = [], [], []
-        rmse_sq, nrmse = 0.0, 0
+    def reset_engine(self) -> None:
+        self.joint.reset(self.true_state)
+        self.estimate = self.true_state.copy()
+        self.u_cmd = np.zeros(2)
 
-    true_state = estimate = u_cmd = None
-    true_trail = est_trail = gps_pts = None
-    rmse_sq = nrmse = 0
-    reset_all()
+    def horizon(self) -> int:
+        return self.joint.N
 
-    frame = 0
-    running = True
-    while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key in (pygame.K_ESCAPE, pygame.K_q):
-                    running = False
-                elif event.key == pygame.K_SPACE:
-                    paused = not paused
-                elif event.key == pygame.K_r:
-                    reset_all()
-                elif event.key == pygame.K_UP:
-                    target_speed = min(target_speed + 1.0, pf.V_BOUNDS[1])
-                elif event.key == pygame.K_DOWN:
-                    target_speed = max(target_speed - 1.0, 0.0)
-                elif event.key in (pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET):
-                    gps_idx = int(np.clip(
-                        gps_idx + (1 if event.key == pygame.K_RIGHTBRACKET else -1),
-                        0, len(GPS_SIGMAS) - 1))
-                    joint.set_gps_sigma(GPS_SIGMAS[gps_idx])
-                else:
-                    name = pygame.key.name(event.key)
-                    if name in pf.PATHS:
-                        path_key = name
-                        path_name, generator = pf.PATHS[path_key]
-                        path = pf.make_path(generator)
-                        curvature = pf.path_curvature(path)
-                        reset_all()
+    def window_points(self) -> list:
+        j = self.joint
+        lo = max(0, j.k - j.W)
+        return [pf.world_to_screen(j.Xv[t][:2]) for t in range(lo, j.k + 1)]
 
-        near = pf.nearest_index(path, estimate[:2])
-        refs = pf.reference_trajectory(path, curvature, near, target_speed,
-                                       joint.N, MPC_DT)
-        if not paused:
-            true_state = plant.step(true_state, u_cmd)
-            gps = true_state[:2] + rng.normal(0.0, GPS_SIGMAS[gps_idx], size=2)
-            v_meas = true_state[3] + rng.normal(0.0, SPEED_SIGMA)
-            estimate, plan_states, plan_ctrls = joint.step(u_cmd, gps, v_meas, refs)
-            u_cmd = plan_ctrls[0]
+    def advance(self, refs):
+        self.true_state = self.plant.step(self.true_state, self.u_cmd)
+        gps, v_meas = self.measure()
+        self.estimate, states, ctrls = self.joint.step(self.u_cmd, gps, v_meas, refs)
+        self.u_cmd = ctrls[0]
+        self._last_gps = gps
+        self._last_delta = float(self.u_cmd[1])
+        return states
 
-            true_trail.append(pf.world_to_screen(true_state[:2]))
-            est_trail.append(pf.world_to_screen(estimate[:2]))
-            gps_pts.append(pf.world_to_screen(gps))
-            for buf in (true_trail, est_trail, gps_pts):
-                if len(buf) > 400:
-                    buf.pop(0)
-            rmse_sq += float(np.sum((true_state[:2] - estimate[:2]) ** 2))
-            nrmse += 1
-        else:
-            plan_states = np.array([joint.Xv[joint.k + j] for j in range(joint.N + 1)])
-
-        # --- render ---
-        screen.fill(pf.BG)
-        pf.draw_path(screen, path)
-        for pt in gps_pts[-120:]:
-            pygame.draw.circle(screen, GPS_COLOR, pt, 2)
-        if len(true_trail) > 1:
-            pygame.draw.lines(screen, TRUE_COLOR, False, true_trail, 2)
-        if len(est_trail) > 1:
-            pygame.draw.lines(screen, EST_COLOR, False, est_trail, 2)
-
-        lo = max(0, joint.k - joint.W)
-        for t in range(lo, joint.k + 1):
-            pygame.draw.circle(screen, WINDOW_COLOR, pf.world_to_screen(joint.Xv[t][:2]), 3, 1)
-        plan_pts = [pf.world_to_screen(s[:2]) for s in plan_states]
-        if len(plan_pts) > 1:
-            pygame.draw.lines(screen, pf.PLAN_COLOR, False, plan_pts, 2)
-
-        pf.draw_car(screen, true_state, float(u_cmd[1]))
-        ex, ey = pf.world_to_screen(estimate[:2])
-        pygame.draw.circle(screen, EST_COLOR, (ex, ey), 6, 2)
-
-        loc_err = float(np.linalg.norm(true_state[:2] - estimate[:2]))
-        rmse = float(np.sqrt(rmse_sq / nrmse)) if nrmse else 0.0
-        cte = pf.cross_track_error(path, true_state[:2])
-        lines = [
-            f"path: {path_name}   target speed={target_speed:.1f} m/s   v={true_state[3]:+.2f}",
-            f"GPS sigma={GPS_SIGMAS[gps_idx]:.1f} m   loc err={loc_err:.2f} m   "
-            f"loc RMSE={rmse:.2f} m   true cross-track={cte:.2f} m",
+    def hud_lines(self) -> list:
+        return self.status_lines() + [
             "SINGLE GRAPH: one optimize() solves estimation window + control horizon",
             "1-5 path  up/down speed  [ ] gps-noise  space pause  r reset  esc quit"
-            + ("   [PAUSED]" if paused else ""),
+            + self.paused_suffix(),
         ]
-        for i, text in enumerate(lines):
-            screen.blit(font.render(text, True, TEXT_COLOR), (10, 10 + i * 20))
 
-        pygame.display.flip()
-        clock.tick(pf.FPS)
-        frame += 1
-        if max_frames is not None and frame >= max_frames:
-            running = False
 
-    pygame.quit()
+def main():
+    JointApp().run()
 
 
 if __name__ == "__main__":

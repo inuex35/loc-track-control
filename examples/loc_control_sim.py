@@ -48,21 +48,13 @@ from gtsam.symbol_shorthand import X
 
 from gtsam_mpc import BicycleModel
 import examples.path_following_sim as pf
-
-# Reuse the path-following world/render setup.
-WIDTH, HEIGHT = pf.WIDTH, pf.HEIGHT
-DT, MPC_DT = pf.DT, pf.MPC_DT
-WHEELBASE = pf.WHEELBASE
-
-TRUE_COLOR = (90, 200, 140)
-EST_COLOR = (90, 150, 255)
-GPS_COLOR = (235, 120, 120)
-WINDOW_COLOR = (250, 220, 120)
-TEXT_COLOR = (210, 210, 220)
-
-# Default measurement noise (1-sigma).
-GPS_SIGMAS = [0.3, 0.6, 1.0, 1.6]   # cycled with [ and ]
-SPEED_SIGMA = 0.3                   # wheel-speed noise [m/s]
+# Shared world/render config, measurement constants and interactive harness.
+# Re-exported here so ``joint_loc_control_sim`` can keep importing them from us.
+from examples._racecar_app import (  # noqa: F401  (re-exported for joint sim)
+    RacecarApp, WIDTH, HEIGHT, DT, MPC_DT, WHEELBASE,
+    GPS_SIGMAS, SPEED_SIGMA,
+    TRUE_COLOR, EST_COLOR, GPS_COLOR, WINDOW_COLOR, TEXT_COLOR,
+)
 
 
 class MovingHorizonEstimator:
@@ -232,168 +224,76 @@ def run(seed: int = 0, steps: int = 300, gps_sigma: float = 1.0,
     }
 
 
-def main() -> None:
-    max_frames_env = os.environ.get("GTSAM_MPC_MAX_FRAMES")
-    max_frames = int(max_frames_env) if max_frames_env else None
-    rng = np.random.default_rng(0)
+class LocControlApp(RacecarApp):
+    """Two-graph pipeline: an MHE solve feeds an independent MPC solve."""
 
-    pygame.init()
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("gtsam-mpc: coupled localization + control")
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont("monospace", 16)
+    caption = "gtsam-mpc: coupled localization + control"
 
-    mpc = pf.make_controller()
-    plant = BicycleModel(wheelbase=WHEELBASE, dt=DT)
-    est_model = BicycleModel(wheelbase=WHEELBASE, dt=DT)
-    estimator = MovingHorizonEstimator(est_model)
+    def setup(self) -> None:
+        self.mpc = pf.make_controller()
+        self.estimator = MovingHorizonEstimator(BicycleModel(wheelbase=WHEELBASE, dt=DT))
+        self.use_estimate = True
+        self.raw_prev_gps = None
+        self.raw_heading = 0.0
+        self.set_gps_sigma(GPS_SIGMAS[self.gps_idx])
 
-    gps_idx = 1
-    estimator.set_gps_sigma(GPS_SIGMAS[gps_idx])
+    def set_gps_sigma(self, sigma: float) -> None:
+        self.estimator.set_gps_sigma(sigma)
 
-    path_key = "1"
-    path_name, generator = pf.PATHS[path_key]
-    path = pf.make_path(generator)
-    curvature = pf.path_curvature(path)
-    target_speed = 8.0
-    use_estimate = True
-    paused = False
+    def reset_engine(self) -> None:
+        self.mpc.reset()
+        self.estimator.reset(self.true_state)
+        self.estimate = self.true_state.copy()
+        self.raw_prev_gps = self.true_state[:2].copy()
+        self.raw_heading = float(self.true_state[2])
 
-    def reset_all():
-        nonlocal true_state, est_state, true_trail, est_trail, gps_pts, rmse_sq, nrmse
-        nonlocal raw_prev_gps, raw_heading
-        true_state = pf.reset_on_path(path, target_speed)
-        estimator.reset(true_state)
-        est_state = true_state.copy()
-        mpc.reset()
-        true_trail, est_trail, gps_pts = [], [], []
-        rmse_sq, nrmse = 0.0, 0
-        raw_prev_gps = true_state[:2].copy()
-        raw_heading = float(true_state[2])
+    def horizon(self) -> int:
+        return self.mpc.horizon
 
-    true_state = est_state = None
-    true_trail = est_trail = gps_pts = None
-    rmse_sq = nrmse = 0
-    raw_prev_gps = raw_heading = None
-    reset_all()
+    def window_points(self) -> list:
+        e = self.estimator
+        lo = max(0, e.k - e.W)
+        return [pf.world_to_screen(e.est[i][:2]) for i in range(lo, e.k + 1)]
 
-    frame = 0
-    running = True
-    while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key in (pygame.K_ESCAPE, pygame.K_q):
-                    running = False
-                elif event.key == pygame.K_SPACE:
-                    paused = not paused
-                elif event.key == pygame.K_r:
-                    reset_all()
-                elif event.key == pygame.K_e:
-                    use_estimate = not use_estimate
-                elif event.key == pygame.K_UP:
-                    target_speed = min(target_speed + 1.0, pf.V_BOUNDS[1])
-                elif event.key == pygame.K_DOWN:
-                    target_speed = max(target_speed - 1.0, 0.0)
-                elif event.key in (pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET):
-                    gps_idx = int(np.clip(
-                        gps_idx + (1 if event.key == pygame.K_RIGHTBRACKET else -1),
-                        0, len(GPS_SIGMAS) - 1))
-                    estimator.set_gps_sigma(GPS_SIGMAS[gps_idx])
-                else:
-                    name = pygame.key.name(event.key)
-                    if name in pf.PATHS:
-                        path_key = name
-                        path_name, generator = pf.PATHS[path_key]
-                        path = pf.make_path(generator)
-                        curvature = pf.path_curvature(path)
-                        reset_all()
+    def extra_key(self, event) -> bool:
+        if event.key == pygame.K_e:
+            self.use_estimate = not self.use_estimate
+            return True
+        return False
 
+    def advance(self, refs):
         # The controller only ever sees the estimate (or raw GPS if toggled).
-        control_state = est_state
-        near = pf.nearest_index(path, control_state[:2])
-        refs = pf.reference_trajectory(path, curvature, near, target_speed,
-                                       mpc.horizon, MPC_DT)
-        plan = mpc.solve(control_state, refs)
+        plan = self.mpc.solve(self.estimate, refs)
+        u = plan.u0
+        self.true_state = self.plant.step(self.true_state, u)
+        gps, v_meas = self.measure()
+        if self.use_estimate:
+            self.estimate = self.estimator.update(u, gps, v_meas)
+        else:
+            # Naive baseline: no fusion. GPS gives position only, so heading must
+            # come from the (noisy) GPS displacement -- which is junk and makes
+            # path tracking diverge. Keep the window populated for display.
+            self.estimator.update(u, gps, v_meas)
+            d = gps - self.raw_prev_gps
+            if np.hypot(d[0], d[1]) > 0.2:
+                self.raw_heading = float(np.arctan2(d[1], d[0]))
+                self.raw_prev_gps = gps.copy()
+            self.estimate = np.array([gps[0], gps[1], self.raw_heading, v_meas])
+        self._last_gps = gps
+        self._last_delta = float(u[1])
+        return plan.states
 
-        if not paused:
-            u = plan.u0
-            true_state = plant.step(true_state, u)
-            # Noisy measurements of the hidden true state.
-            gps = true_state[:2] + rng.normal(0.0, GPS_SIGMAS[gps_idx], size=2)
-            v_meas = true_state[3] + rng.normal(0.0, SPEED_SIGMA)
-            if use_estimate:
-                est_state = estimator.update(u, gps, v_meas)
-            else:
-                # Naive baseline: no fusion. GPS gives position only, so heading
-                # must come from the (noisy) GPS displacement -- which is junk and
-                # makes path tracking diverge. This is the honest "raw GPS" case.
-                estimator.update(u, gps, v_meas)  # keep window populated for display
-                d = gps - raw_prev_gps
-                if np.hypot(d[0], d[1]) > 0.2:
-                    raw_heading = float(np.arctan2(d[1], d[0]))
-                    raw_prev_gps = gps.copy()
-                est_state = np.array([gps[0], gps[1], raw_heading, v_meas])
-
-            true_trail.append(pf.world_to_screen(true_state[:2]))
-            est_trail.append(pf.world_to_screen(est_state[:2]))
-            gps_pts.append(pf.world_to_screen(gps))
-            for buf in (true_trail, est_trail, gps_pts):
-                if len(buf) > 400:
-                    buf.pop(0)
-            rmse_sq += float(np.sum((true_state[:2] - est_state[:2]) ** 2))
-            nrmse += 1
-
-        # --- render ---
-        screen.fill(pf.BG)
-        pf.draw_path(screen, path)
-
-        for pt in gps_pts[-120:]:
-            pygame.draw.circle(screen, GPS_COLOR, pt, 2)
-        if len(true_trail) > 1:
-            pygame.draw.lines(screen, TRUE_COLOR, False, true_trail, 2)
-        if len(est_trail) > 1:
-            pygame.draw.lines(screen, EST_COLOR, False, est_trail, 2)
-
-        # Estimator window (smoothed states currently in the graph).
-        lo = max(0, estimator.k - estimator.W)
-        win_pts = [pf.world_to_screen(estimator.est[i][:2])
-                   for i in range(lo, estimator.k + 1)]
-        for pt in win_pts:
-            pygame.draw.circle(screen, WINDOW_COLOR, pt, 3, 1)
-
-        plan_pts = [pf.world_to_screen(s[:2]) for s in plan.states]
-        if len(plan_pts) > 1:
-            pygame.draw.lines(screen, pf.PLAN_COLOR, False, plan_pts, 2)
-
-        pf.draw_car(screen, true_state, float(plan.controls[0, 1]))
-        ex, ey = pf.world_to_screen(est_state[:2])
-        pygame.draw.circle(screen, EST_COLOR, (ex, ey), 6, 2)
-
-        loc_err = float(np.linalg.norm(true_state[:2] - est_state[:2]))
-        rmse = float(np.sqrt(rmse_sq / nrmse)) if nrmse else 0.0
-        cte = pf.cross_track_error(path, true_state[:2])
-        lines = [
-            f"path: {path_name}   target speed={target_speed:.1f} m/s   v={true_state[3]:+.2f}",
-            f"GPS sigma={GPS_SIGMAS[gps_idx]:.1f} m   loc err={loc_err:.2f} m   "
-            f"loc RMSE={rmse:.2f} m   true cross-track={cte:.2f} m",
-            f"control source: {'ESTIMATE (MHE fused)' if use_estimate else 'RAW GPS'}"
-            "   green=true blue=est red=GPS",
-            "1-5 path  up/down speed  [ ] gps-noise  e toggle  space pause  r reset  esc quit"
-            + ("   [PAUSED]" if paused else ""),
+    def hud_lines(self) -> list:
+        source = "ESTIMATE (MHE fused)" if self.use_estimate else "RAW GPS"
+        return self.status_lines() + [
+            f"control source: {source}   green=true blue=est red=GPS",
+            "1-5 path  up/down speed  [ ] gps-noise  e toggle  space pause  "
+            "r reset  esc quit" + self.paused_suffix(),
         ]
-        for i, text in enumerate(lines):
-            screen.blit(font.render(text, True, TEXT_COLOR), (10, 10 + i * 20))
 
-        pygame.display.flip()
-        clock.tick(pf.FPS)
 
-        frame += 1
-        if max_frames is not None and frame >= max_frames:
-            running = False
-
-    pygame.quit()
+def main() -> None:
+    LocControlApp().run()
 
 
 if __name__ == "__main__":
