@@ -33,12 +33,10 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
-import gtsam
 import pygame
-from gtsam.symbol_shorthand import X
 
 import examples.bicycle_sim as bsim
-from gtsam_mpc import BicycleMPC, BicycleModel
+from gtsam_mpc import BicycleMPC, BicycleModel, ConstantVelocityTracker
 
 DT = bsim.DT
 HORIZON = 25
@@ -51,9 +49,10 @@ OBS_RING = (255, 90, 90)
 DET_COLOR = (255, 200, 80)
 PRED_COLOR = (255, 140, 140)
 
-# Constant-velocity tracker matrices.
-_F = np.array([[1, 0, DT, 0], [0, 1, 0, DT], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=float)
-_H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=float)
+# Constant-velocity factor-graph tracker for the moving obstacles.
+_TRACKER = ConstantVelocityTracker(dt=DT, process_sigma=(0.05, 0.05, 0.4, 0.4),
+                                   meas_sigma=0.6)
+_F = _TRACKER.F
 
 
 def make_controller() -> BicycleMPC:
@@ -74,27 +73,13 @@ def make_controller() -> BicycleMPC:
 
 
 def estimate_state(detections: deque, dt: float) -> np.ndarray:
-    """Smooth recent detections into ``[x, y, vx, vy]`` via a CV factor graph."""
-    dets = list(detections)
-    T = len(dets) - 1
-    if T < 1:
-        return np.array([dets[-1][0], dets[-1][1], 0.0, 0.0])
-    fg = gtsam.GaussianFactorGraph()
-    fg.add(X(0), np.eye(4), np.zeros(4),
-           gtsam.noiseModel.Diagonal.Sigmas(np.full(4, 10.0)))
-    proc = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.05, 0.05, 0.4, 0.4]))
-    meas = gtsam.noiseModel.Diagonal.Sigmas(np.full(2, 0.6))
-    for t in range(T):
-        fg.add(X(t + 1), np.eye(4), X(t), -_F, np.zeros(4), proc)
-    for t in range(T + 1):
-        fg.add(X(t), _H, dets[t], meas)
-    return fg.optimize().at(X(T))
+    """Smooth recent detections into ``[x, y, vx, vy]`` (CV factor-graph tracker)."""
+    return _TRACKER.estimate(list(detections))
 
 
 def predict_horizon(state: np.ndarray, horizon: int, dt: float) -> np.ndarray:
     """Constant-velocity rollout of an obstacle over the horizon -> (N+1, 2)."""
-    p, v = state[:2], state[2:]
-    return np.array([p + (k * dt) * v for k in range(horizon + 1)])
+    return _TRACKER.predict(state, horizon, dt)
 
 
 class Obstacle:

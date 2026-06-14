@@ -16,47 +16,16 @@ hard part of real MOT and is out of scope for this didactic sample.
 Run:  python examples/tracking.py
 """
 
-from __future__ import annotations
-
 import numpy as np
-import gtsam
-from gtsam.symbol_shorthand import X
 
-
-# State is [px, py, vx, vy]; we observe [px, py].
-def _F(dt: float) -> np.ndarray:
-    return np.array(
-        [[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=float
-    )
-
-
-_H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=float)
-
-
-def _smooth_track(measurements: list[np.ndarray], dt: float,
-                  meas_sigma: float) -> np.ndarray:
-    """Batch-smooth one track from its position detections."""
-    T = len(measurements) - 1
-    F = _F(dt)
-    graph = gtsam.GaussianFactorGraph()
-    # Loose prior to anchor the (otherwise gauge-free) initial state.
-    graph.add(X(0), np.eye(4), np.zeros(4),
-              gtsam.noiseModel.Diagonal.Sigmas(np.full(4, 10.0)))
-    proc = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.02, 0.02, 0.3, 0.3]))
-    meas = gtsam.noiseModel.Diagonal.Sigmas(np.full(2, meas_sigma))
-    for t in range(T):
-        # x_{t+1} - F x_t = 0  (constant-velocity motion prior)
-        graph.add(X(t + 1), np.eye(4), X(t), -F, np.zeros(4), proc)
-    for t in range(T + 1):
-        graph.add(X(t), _H, measurements[t], meas)
-    sol = graph.optimize()
-    return np.array([sol.at(X(t)) for t in range(T + 1)])
+from gtsam_mpc import ConstantVelocityTracker
 
 
 def run(seed: int = 0) -> dict:
     rng = np.random.default_rng(seed)
     dt, T, meas_sigma = 0.1, 40, 0.7
-    F = _F(dt)
+    tracker = ConstantVelocityTracker(dt=dt, meas_sigma=meas_sigma)
+    F, H = tracker.F, tracker.H
 
     # A few targets with different initial position/velocity.
     inits = [
@@ -71,8 +40,8 @@ def run(seed: int = 0) -> dict:
         truth = [x0]
         for _ in range(T):
             truth.append(F @ truth[-1])
-        detections = [_H @ truth[t] + rng.normal(0, meas_sigma, 2) for t in range(T + 1)]
-        estimate = _smooth_track(detections, dt, meas_sigma)
+        detections = [H @ truth[t] + rng.normal(0, meas_sigma, 2) for t in range(T + 1)]
+        estimate = tracker.smooth(detections)
 
         truth_pos = np.array([s[:2] for s in truth])
         det = np.array(detections)

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gtsam-mpc"
-version = "0.1.0"
-description = "Linear Model Predictive Control as factor-graph optimization with GTSAM"
+version = "0.2.0"
+description = "Estimation, control and tracking as factor-graph optimization with GTSAM"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }

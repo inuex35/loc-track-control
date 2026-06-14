@@ -1,15 +1,17 @@
 # gtsam-mpc
 
-**Model Predictive Control (MPC)** formulated as **factor-graph optimization** and solved with [GTSAM](https://gtsam.org/).
+**Estimation, control and tracking** as **factor-graph optimization**, solved with [GTSAM](https://gtsam.org/).
 
-A finite-horizon linear-quadratic optimal control problem is mathematically equivalent to maximum-a-posteriori (MAP) inference on a Gaussian factor graph. This package builds that graph and lets GTSAM's sparse linear solver recover the optimal trajectory — eliminating the graph is the same computation as the classical Riccati recursion, but expressed declaratively as factors.
+The package is organized around one idea: estimation, control and tracking are all maximum-a-posteriori (MAP) inference on factor graphs built from a shared vocabulary of factors. A finite-horizon linear-quadratic optimal control problem, for instance, is exactly MAP inference on a Gaussian factor graph — eliminating it is the classical Riccati recursion, expressed declaratively as factors.
 
-Two solvers are provided:
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the package layout (`models`, `factors`, `constraints`, `control`, `estimation`, `joint`, `paths`).
+
+Two MPC solvers are provided:
 
 | Solver           | System                          | Graph            | Constraints |
 | ---------------- | ------------------------------- | ---------------- | ----------- |
 | `LinearMPC`      | linear (`A`, `B`)               | Gaussian (LQR)   | equality only (dynamics + initial state) |
-| `BicycleMPC`     | nonlinear kinematic bicycle     | nonlinear (LM)   | equality + **soft** input/speed limits (barrier factors) |
+| `BicycleMPC`     | nonlinear kinematic bicycle     | nonlinear (LM)   | equality + input/speed/obstacle inequalities via a strategy (barrier / augmented-Lagrangian / slack) |
 
 ## The problem
 
@@ -240,11 +242,20 @@ The suite validates the factor-graph solution against an independent finite-hori
   - `.simulate(x0, steps, xref=None) -> MPCResult` — closed-loop receding-horizon rollout.
 - **`MPCResult`** — `.states`, `.controls`, `.u0`.
 - **`BicycleModel(wheelbase, dt)`** — nonlinear kinematic bicycle; `.step`, `.jacobians`.
-- **`BicycleMPC(model, Q, R, horizon, Qf=None, a_bounds, delta_bounds, v_bounds, barrier_weight, safety_radius, obstacle_weight, max_iterations)`**
-  - `.solve(x0, xref, obstacles=None, warm_start=True) -> MPCResult`
-  - `.control(x0, xref, obstacles=None) -> np.ndarray`
-  - `.simulate(x0, xref, steps, obstacles=None) -> MPCResult`
-  - `.reset()` — clear the cached warm-start solution.
+- **`BicycleMPC(model, Q, R, horizon, Qf=None, a_bounds, delta_bounds, v_bounds, constraints=None, constraint_mode="barrier", barrier_weight, safety_radius, obstacle_weight, ...)`**
+  - `.solve(x0, xref, obstacles=None, warm_start=True) -> MPCResult` (`xref` is a single state or a `(horizon+1, 4)` reference trajectory)
+  - `.control(x0, xref, obstacles=None) -> np.ndarray`, `.simulate(x0, xref, steps, obstacles=None) -> MPCResult`, `.reset()`
+  - Pass either `constraint_mode` (`"barrier"`/`"al"`/`"slack"`) or a `constraints=` strategy object.
+
+**Constraints** (`gtsam_mpc.constraints`): `BarrierStrategy`, `AugmentedLagrangianStrategy`, `SlackStrategy`, `Inequality`, `make_strategy`.
+
+**Estimation** (`gtsam_mpc.estimation`):
+- **`MovingHorizonEstimator(model, window, gps_sigma, ...)`** — `.reset(x0)`, `.update(u, gps, v) -> state`.
+- **`ConstantVelocityTracker(dt, process_sigma, meas_sigma)`** — `.smooth(detections)`, `.estimate(detections)`, `.predict(state, horizon, dt=None)`.
+
+**Joint** (`gtsam_mpc.joint`): **`JointEstimatorMPC(...)`** — estimation window + control horizon in one graph; `.reset(x0)`, `.step(u, gps, v, reference) -> (estimate, states, controls)`.
+
+**Factors / paths** (`gtsam_mpc.factors`, `gtsam_mpc.paths`): the reusable `CustomFactor` vocabulary and path geometry (`make_path`, `path_curvature`, `reference_trajectory`, `cross_track_error`, …). See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## References
 

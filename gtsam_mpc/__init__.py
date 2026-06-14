@@ -1,21 +1,57 @@
-"""gtsam-mpc: Linear Model Predictive Control as factor-graph optimization.
+"""gtsam-mpc: estimation, control and tracking as factor-graph optimization.
 
-This package formulates finite-horizon linear-quadratic MPC as maximum-a-posteriori
-inference on a Gaussian factor graph and solves it with GTSAM.
+The package is organized around one idea: estimation, control and tracking are
+all maximum-a-posteriori inference on factor graphs built from a shared
+vocabulary of factors.
+
+    models       -- dynamics models (linear systems, kinematic bicycle)
+    factors      -- reusable GTSAM CustomFactor builders (the vocabulary)
+    constraints  -- inequality strategies (barrier / augmented Lagrangian / slack)
+    control      -- LinearMPC, BicycleMPC
+    estimation   -- MovingHorizonEstimator, ConstantVelocityTracker
+    joint        -- JointEstimatorMPC (estimation window + control horizon, one graph)
+    paths        -- reference paths and path-tracking geometry
 """
 
-from .bicycle import BicycleMPC, BicycleModel
-from .mpc import LinearMPC, MPCResult
-from .system import LinearSystem, double_integrator, point_mass_2d
+from . import factors, paths
+from .constraints import (
+    AugmentedLagrangianStrategy,
+    BarrierStrategy,
+    ConstraintStrategy,
+    Inequality,
+    SlackStrategy,
+    make_strategy,
+)
+from .control import BicycleMPC, LinearMPC, MPCResult
+from .estimation import ConstantVelocityTracker, MovingHorizonEstimator
+from .joint import JointEstimatorMPC
+from .models import BicycleModel, LinearSystem, double_integrator, point_mass_2d
 
 __all__ = [
-    "LinearMPC",
-    "MPCResult",
+    # models
     "LinearSystem",
     "double_integrator",
     "point_mass_2d",
     "BicycleModel",
+    # control
+    "LinearMPC",
     "BicycleMPC",
+    "MPCResult",
+    # constraints
+    "ConstraintStrategy",
+    "BarrierStrategy",
+    "AugmentedLagrangianStrategy",
+    "SlackStrategy",
+    "Inequality",
+    "make_strategy",
+    # estimation
+    "MovingHorizonEstimator",
+    "ConstantVelocityTracker",
+    # joint
+    "JointEstimatorMPC",
+    # submodules
+    "factors",
+    "paths",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
