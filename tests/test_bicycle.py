@@ -116,3 +116,39 @@ def test_invalid_arguments_raise(kwargs):
     model = BicycleModel()
     with pytest.raises(ValueError):
         BicycleMPC(model, **kwargs)
+
+
+def test_invalid_constraint_mode_raises():
+    with pytest.raises(ValueError):
+        _default_mpc(constraint_mode="penalty")
+
+
+def test_al_satisfies_input_bounds_tightly():
+    # Augmented Lagrangian should respect the box much more tightly than the
+    # fixed-weight barrier, even when the goal makes the bounds active.
+    a_lim, d_lim = 2.0, 0.4
+    mpc = _default_mpc(a_bounds=(-a_lim, a_lim), delta_bounds=(-d_lim, d_lim),
+                       constraint_mode="al")
+    result = mpc.simulate(np.zeros(4), np.array([15.0, 8.0, 0.0, 0.0]), steps=20)
+    a, delta = result.controls[:, 0], result.controls[:, 1]
+    assert a.max() <= a_lim + 1e-2 and a.min() >= -a_lim - 1e-2
+    assert delta.max() <= d_lim + 1e-2 and delta.min() >= -d_lim - 1e-2
+
+
+def test_al_respects_speed_bounds():
+    mpc = _default_mpc(v_bounds=(-1.0, 3.0), constraint_mode="al")
+    result = mpc.simulate(np.zeros(4), np.array([20.0, 0.0, 0.0, 0.0]), steps=40)
+    v = result.states[:, 3]
+    assert v.max() <= 3.0 + 2e-2 and v.min() >= -1.0 - 2e-2
+
+
+def test_al_avoids_static_obstacle():
+    mpc = _default_mpc(v_bounds=(-2.0, 4.0), safety_radius=2.0,
+                       constraint_mode="al")
+    goal = np.array([12.0, 0.0, 0.0, 0.0])
+    obstacle = np.array([6.0, 0.8])
+    result = mpc.simulate(np.zeros(4), goal, steps=120, obstacles=[obstacle])
+    min_dist = np.min(np.linalg.norm(result.states[:, :2] - obstacle, axis=1))
+    # AL drives the keep-out violation toward zero -> tighter than the barrier.
+    assert min_dist > 2.0 - 0.1
+    assert result.states[-1, 0] > 9.0

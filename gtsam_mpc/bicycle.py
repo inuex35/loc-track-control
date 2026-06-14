@@ -184,9 +184,21 @@ class BicycleMPC:
         a_bounds: ``(min, max)`` acceleration limits [m/s^2].
         delta_bounds: ``(min, max)`` steering-angle limits [rad].
         v_bounds: Optional ``(min, max)`` speed limits [m/s].
-        barrier_weight: Stiffness of the soft box-constraint penalty (the
-            precision of the barrier factors). Larger = closer to a hard limit.
-        max_iterations: Max Levenberg-Marquardt iterations per solve.
+        constraint_mode: How input/speed/obstacle inequality constraints are
+            handled. ``"barrier"`` (default) is a fixed one-sided quadratic
+            penalty (soft, weight-tuned). ``"al"`` is the Augmented Lagrangian
+            method: an outer loop updates per-constraint multipliers so the
+            bounds are satisfied tightly without hand-tuning the penalty weight.
+            Dynamics and the initial condition stay hard equality constraints in
+            both modes.
+        barrier_weight: Penalty precision in ``"barrier"`` mode (larger = closer
+            to a hard limit). Unused in ``"al"`` mode.
+        al_iterations: Number of outer Augmented-Lagrangian iterations.
+        al_rho: Initial AL penalty parameter, scaled up by ``al_rho_scale`` each
+            outer iteration up to ``al_rho_max``.
+        al_tol: Outer loop stops once the worst constraint violation is below
+            this.
+        max_iterations: Max Levenberg-Marquardt iterations per (inner) solve.
     """
 
     def __init__(
@@ -199,13 +211,23 @@ class BicycleMPC:
         a_bounds: tuple[float, float] = (-3.0, 3.0),
         delta_bounds: tuple[float, float] = (-0.5, 0.5),
         v_bounds: tuple[float, float] | None = None,
+        constraint_mode: str = "barrier",
         barrier_weight: float = 300.0,
         safety_radius: float = 2.0,
         obstacle_weight: float = 150.0,
+        al_iterations: int = 5,
+        al_rho: float = 100.0,
+        al_rho_scale: float = 10.0,
+        al_rho_max: float = 1e6,
+        al_tol: float = 1e-3,
         max_iterations: int = 100,
     ) -> None:
         if horizon < 1:
             raise ValueError(f"horizon must be >= 1, got {horizon}")
+        if constraint_mode not in ("barrier", "al"):
+            raise ValueError(
+                f"constraint_mode must be 'barrier' or 'al', got {constraint_mode!r}"
+            )
         self.model = model
         self.horizon = int(horizon)
         self.Q = _require_pd("Q", Q, 4)
@@ -215,9 +237,15 @@ class BicycleMPC:
         self.u_lower = np.array([a_bounds[0], delta_bounds[0]])
         self.u_upper = np.array([a_bounds[1], delta_bounds[1]])
         self.v_bounds = v_bounds
+        self.constraint_mode = constraint_mode
         self.barrier_weight = float(barrier_weight)
         self.safety_radius = float(safety_radius)
         self.obstacle_weight = float(obstacle_weight)
+        self.al_iterations = int(al_iterations)
+        self.al_rho = float(al_rho)
+        self.al_rho_scale = float(al_rho_scale)
+        self.al_rho_max = float(al_rho_max)
+        self.al_tol = float(al_tol)
 
         self._params = gtsam.LevenbergMarquardtParams()
         self._params.setMaxIterations(int(max_iterations))
@@ -344,20 +372,15 @@ class BicycleMPC:
         return out
 
     # --- graph construction ----------------------------------------------
-    def _build_graph(
-        self, x0: np.ndarray, xref: np.ndarray, obstacles: list[np.ndarray] | None
+    def _build_base_graph(
+        self, x0: np.ndarray, xref: np.ndarray
     ) -> gtsam.NonlinearFactorGraph:
+        """Hard dynamics + initial condition + quadratic costs (no inequalities)."""
         N = self.horizon
         cost_x = gtsam.noiseModel.Gaussian.Information(self.Q)
         cost_u = gtsam.noiseModel.Gaussian.Information(self.R)
         cost_xf = gtsam.noiseModel.Gaussian.Information(self.Qf)
         constraint = gtsam.noiseModel.Constrained.All(4)
-        u_barrier = gtsam.noiseModel.Diagonal.Precisions(
-            np.full(2, self.barrier_weight)
-        )
-        obs_barrier = gtsam.noiseModel.Diagonal.Precisions(
-            np.array([self.obstacle_weight])
-        )
 
         graph = gtsam.NonlinearFactorGraph()
         graph.add(gtsam.CustomFactor(constraint, [X(0)], self._prior_error(x0)))
@@ -371,6 +394,24 @@ class BicycleMPC:
                 gtsam.CustomFactor(cost_x, [X(k)], self._state_cost_error(xref[k]))
             )
             graph.add(gtsam.CustomFactor(cost_u, [U(k)], self._control_cost_error))
+        graph.add(
+            gtsam.CustomFactor(cost_xf, [X(N)], self._state_cost_error(xref[N]))
+        )
+        return graph
+
+    def _build_graph(
+        self, x0: np.ndarray, xref: np.ndarray, obstacles: list[np.ndarray] | None
+    ) -> gtsam.NonlinearFactorGraph:
+        """Base graph plus fixed-weight barrier penalties (``"barrier"`` mode)."""
+        N = self.horizon
+        graph = self._build_base_graph(x0, xref)
+        u_barrier = gtsam.noiseModel.Diagonal.Precisions(
+            np.full(2, self.barrier_weight)
+        )
+        obs_barrier = gtsam.noiseModel.Diagonal.Precisions(
+            np.array([self.obstacle_weight])
+        )
+        for k in range(N):
             graph.add(
                 gtsam.CustomFactor(
                     u_barrier, [U(k)], self._box_error(self.u_lower, self.u_upper)
@@ -385,10 +426,6 @@ class BicycleMPC:
                 graph.add(
                     gtsam.CustomFactor(v_barrier, [X(k)], self._box_error(lo, hi))
                 )
-        graph.add(
-            gtsam.CustomFactor(cost_xf, [X(N)], self._state_cost_error(xref[N]))
-        )
-
         if obstacles:
             for obs in obstacles:
                 for k in range(N + 1):
@@ -399,6 +436,118 @@ class BicycleMPC:
                         )
                     )
         return graph
+
+    # --- Augmented Lagrangian --------------------------------------------
+    def _constraint_specs(self, obstacles: list[np.ndarray] | None) -> list[dict]:
+        """Inequality constraints ``g(.) <= 0`` as records for the AL solver.
+
+        Each record holds the variable key, a function returning ``(g, dg/dx)``
+        at that variable, and the current multiplier vector ``lam`` (>= 0),
+        initialized to zero.
+        """
+        N = self.horizon
+        specs: list[dict] = []
+
+        u_lower, u_upper = self.u_lower, self.u_upper
+        u_jac = np.vstack([np.eye(2), -np.eye(2)])
+
+        def make_u_eval():
+            def ev(u):
+                return np.concatenate([u - u_upper, u_lower - u]), u_jac
+            return ev
+
+        for k in range(N):
+            specs.append({"key": U(k), "ev": make_u_eval(), "lam": np.zeros(4)})
+
+        if self.v_bounds is not None:
+            vlo, vhi = self.v_bounds
+            v_jac = np.zeros((2, 4))
+            v_jac[0, 3], v_jac[1, 3] = 1.0, -1.0
+
+            def make_v_eval():
+                def ev(x):
+                    return np.array([x[3] - vhi, vlo - x[3]]), v_jac
+                return ev
+
+            # Constrain the predicted future states X(1..N).
+            for k in range(1, N + 1):
+                specs.append({"key": X(k), "ev": make_v_eval(), "lam": np.zeros(2)})
+
+        if obstacles:
+            radius = self.safety_radius
+
+            def make_obs_eval(p):
+                def ev(x):
+                    d = x[:2] - p
+                    dist = float(np.hypot(d[0], d[1]))
+                    J = np.zeros((1, 4))
+                    if dist > 1e-6:
+                        J[0, 0] = -d[0] / dist
+                        J[0, 1] = -d[1] / dist
+                    return np.array([radius - dist]), J
+                return ev
+
+            for obs in obstacles:
+                for k in range(N + 1):
+                    specs.append(
+                        {"key": X(k), "ev": make_obs_eval(obs[k]), "lam": np.zeros(1)}
+                    )
+        return specs
+
+    @staticmethod
+    def _al_factor(key, ev, lam: np.ndarray, rho: float) -> gtsam.CustomFactor:
+        """AL penalty factor for ``g(.) <= 0``: residual ``max(0, g + lam/rho)``.
+
+        With precision ``rho`` the cost is ``(rho/2)||max(0, g + lam/rho)||^2``,
+        whose gradient is ``(rho*g + lam) * dg/dx`` on the active set -- exactly
+        the Augmented Lagrangian term for an inequality constraint.
+        """
+        m = lam.shape[0]
+        noise = gtsam.noiseModel.Diagonal.Precisions(np.full(m, rho))
+
+        def error(this, values, H):
+            x = values.atVector(this.keys()[0])
+            g, J = ev(x)
+            shifted = g + lam / rho
+            active = shifted > 0.0
+            if H is not None:
+                H[0] = J * active[:, None]
+            return np.where(active, shifted, 0.0)
+
+        return gtsam.CustomFactor(noise, [key], error)
+
+    def _solve_al(
+        self,
+        x0: np.ndarray,
+        xref: np.ndarray,
+        obstacles: list[np.ndarray] | None,
+        initial: gtsam.Values,
+    ) -> gtsam.Values:
+        """Augmented-Lagrangian outer loop over the hard-dynamics base graph."""
+        base = self._build_base_graph(x0, xref)
+        specs = self._constraint_specs(obstacles)
+        rho = self.al_rho
+        values = initial
+
+        for _ in range(self.al_iterations):
+            graph = gtsam.NonlinearFactorGraph(base)
+            for s in specs:
+                graph.add(self._al_factor(s["key"], s["ev"], s["lam"], rho))
+            values = gtsam.LevenbergMarquardtOptimizer(
+                graph, values, self._params
+            ).optimize()
+
+            # Dual update: lam <- max(0, lam + rho * g); track worst violation.
+            worst = 0.0
+            for s in specs:
+                g, _ = s["ev"](values.atVector(s["key"]))
+                s["lam"] = np.maximum(0.0, s["lam"] + rho * g)
+                worst = max(worst, float(g.max()))
+            if worst < self.al_tol:
+                break
+            rho = min(rho * self.al_rho_scale, self.al_rho_max)
+
+        return values
 
     def _rollout_init(self, x0: np.ndarray) -> gtsam.Values:
         values = gtsam.Values()
@@ -439,15 +588,18 @@ class BicycleMPC:
         xref = self._normalize_xref(xref)
         obs = self._normalize_obstacles(obstacles) if obstacles else None
 
-        graph = self._build_graph(x0, xref, obs)
         if warm_start and self._last_solution is not None:
             initial = self._last_solution
         else:
             initial = self._rollout_init(x0)
 
-        result = gtsam.LevenbergMarquardtOptimizer(
-            graph, initial, self._params
-        ).optimize()
+        if self.constraint_mode == "al":
+            result = self._solve_al(x0, xref, obs, initial)
+        else:
+            graph = self._build_graph(x0, xref, obs)
+            result = gtsam.LevenbergMarquardtOptimizer(
+                graph, initial, self._params
+            ).optimize()
         self._last_solution = result
 
         states = np.array([result.atVector(X(k)) for k in range(self.horizon + 1)])
