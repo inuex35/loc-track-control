@@ -41,7 +41,7 @@ OBS_SPACING = 55        # path-index spacing between obstacles
 OBS_SPEED = 4.0         # obstacle speed along the track (slow traffic) [m/s]
 SAFETY_RADIUS = 3.0
 N_SIGMA = 1.5
-GPS_SIGMA = 0.6
+GPS_SIGMA = 0.3
 SPEED_SIGMA = 0.3
 OBS_DET_SIGMA = 0.6
 TARGET_SPEED = 8.0
@@ -49,6 +49,19 @@ WHEELBASE = pf.WHEELBASE
 
 OBS_COLOR = (255, 90, 90)
 PRED_COLOR = (255, 150, 150)
+EGO_GPS_COLOR = (255, 210, 90)    # raw GPS fixes (the localization noise)
+TRUE_TRAIL_COLOR = (90, 200, 140)
+EST_TRAIL_COLOR = (90, 150, 255)
+UNCERT_COLOR = (130, 170, 255)    # localization uncertainty ellipse
+
+
+def _cov_ellipse_points(center, cov, n_sigma=2.0, k=24):
+    """World-frame points of the ``n_sigma`` covariance ellipse around ``center``."""
+    vals, vecs = np.linalg.eigh(cov)
+    vals = np.maximum(vals, 1e-9)
+    axes = n_sigma * np.sqrt(vals)
+    return [center + vecs @ (axes * np.array([np.cos(a), np.sin(a)]))
+            for a in np.linspace(0.0, 2 * np.pi, k, endpoint=False)]
 
 
 def _tangent_normal(path, idx):
@@ -168,6 +181,9 @@ def main() -> None:
     estimate = true.copy()
     u = np.zeros(2)
     states = np.tile(true, (jtc.N + 1, 1))
+    ego_gps: list = []
+    true_trail: list = []
+    est_trail: list = []
     paused = False
 
     frame = 0
@@ -184,6 +200,7 @@ def main() -> None:
                 elif event.key == pygame.K_r:
                     jtc, path, curv, true, obs, det_hist, preds = setup()
                     estimate = true.copy(); u = np.zeros(2)
+                    ego_gps = []; true_trail = []; est_trail = []
 
         if not paused:
             for o in obs:
@@ -201,6 +218,12 @@ def main() -> None:
                 det_hist[j].append(dets[j])
                 if len(det_hist[j]) > 60:
                     det_hist[j].pop(0)
+            ego_gps.append(gps.copy())
+            true_trail.append(true[:2].copy())
+            est_trail.append(estimate[:2].copy())
+            for buf in (ego_gps, true_trail, est_trail):
+                if len(buf) > 90:
+                    buf.pop(0)
 
         # --- render ---
         screen.fill(pf.BG)
@@ -214,6 +237,21 @@ def main() -> None:
             radius = SAFETY_RADIUS + N_SIGMA * jtc.std.get((j, 0), 0.0)
             pygame.draw.circle(screen, OBS_COLOR, oc, int(0.8 * pf.PIXELS_PER_METER))
             pygame.draw.circle(screen, OBS_COLOR, oc, int(radius * pf.PIXELS_PER_METER), 1)
+        # Ego localization noise: raw GPS fixes, true vs estimated trail, and the
+        # 2-sigma position-uncertainty ellipse around the estimate.
+        for g in ego_gps:
+            pygame.draw.circle(screen, EGO_GPS_COLOR, pf.world_to_screen(g), 2)
+        if len(true_trail) > 1:
+            pygame.draw.lines(screen, TRUE_TRAIL_COLOR, False,
+                              [pf.world_to_screen(p) for p in true_trail], 2)
+        if len(est_trail) > 1:
+            pygame.draw.lines(screen, EST_TRAIL_COLOR, False,
+                              [pf.world_to_screen(p) for p in est_trail], 2)
+        if jtc.ego_pos_cov is not None:
+            ell = _cov_ellipse_points(estimate[:2], jtc.ego_pos_cov, n_sigma=2.0)
+            pygame.draw.polygon(screen, UNCERT_COLOR,
+                                [pf.world_to_screen(p) for p in ell], 1)
+
         pygame.draw.lines(screen, pf.PLAN_COLOR, False,
                           [pf.world_to_screen(s[:2]) for s in states], 2)
         pf.draw_car(screen, true, float(u[1]))
@@ -222,11 +260,15 @@ def main() -> None:
 
         loc_err = float(np.linalg.norm(true[:2] - estimate[:2]))
         clr = min(float(np.linalg.norm(true[:2] - o.position())) for o in obs)
+        gps_sd = (np.sqrt(np.trace(jtc.ego_pos_cov) / 2.0)
+                  if jtc.ego_pos_cov is not None else 0.0)
         lines = [
-            f"loc err={loc_err:.2f} m   moving obstacles={len(obs)} @ {OBS_SPEED:.0f} m/s   "
-            f"nearest clearance={clr:.2f} m",
-            f"base safety radius={SAFETY_RADIUS:.0f} m + {N_SIGMA}*track-std (uncertainty-aware)",
-            "ONE GRAPH: localize + track + avoid    green=true blue=est red=obstacle",
+            f"loc err={loc_err:.2f} m   est 1-sigma={gps_sd:.2f} m   "
+            f"obstacles={len(obs)} @ {OBS_SPEED:.0f} m/s   nearest clearance={clr:.2f} m",
+            "amber=raw GPS fixes   green=true path   blue=estimate path   "
+            "blue ellipse=2-sigma localization uncertainty",
+            "ONE GRAPH (single optimize): localize + track + avoid   "
+            "green line=MPC plan (from estimate)   red=obstacle",
             "space pause   r reset   esc quit" + ("   [PAUSED]" if paused else ""),
         ]
         for i, text in enumerate(lines):

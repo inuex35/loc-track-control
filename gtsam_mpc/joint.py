@@ -236,6 +236,7 @@ class JointLocTrackControl(JointEstimatorMPC):
             self.Odet[j] = [state[:2].copy()]
         # std[(j, i)] : obstacle position std at horizon step i, from last solve.
         self.std = {}
+        self.ego_pos_cov = None   # ego current-state position covariance (2x2)
 
     def _add_obstacle_factors(self, graph, lo) -> None:
         k, N = self.k, self.N
@@ -270,12 +271,20 @@ class JointLocTrackControl(JointEstimatorMPC):
                 del self.Ov[j][t]
 
     def _update_radii(self, graph, result) -> None:
-        """Read obstacle marginal covariance -> per-horizon position std (next solve)."""
+        """Read obstacle marginal covariance -> per-horizon position std (next solve).
+
+        Also caches the ego current-state position covariance (``ego_pos_cov``)
+        for localization-uncertainty visualization.
+        """
         k, N = self.k, self.N
         try:
             marg = _gtsam.Marginals(graph, result)
         except Exception:
             return
+        try:
+            self.ego_pos_cov = np.asarray(marg.marginalCovariance(X(k)))[:2, :2]
+        except Exception:
+            self.ego_pos_cov = None
         for j in range(self.M):
             for i in range(N + 1):
                 try:
