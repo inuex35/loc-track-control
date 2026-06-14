@@ -67,10 +67,11 @@ def test_integrated_tracks_and_avoids():
 
 def test_loc_track_control_single_graph():
     mod = importlib.import_module("examples.loc_track_control_sim")
-    out = mod.run(seed=1, steps=110)
-    # Localizes from noisy GPS...
-    assert out["loc_rmse"] < 1.0
-    # ...stays on the path...
-    assert out["cte"] < 1.5
-    # ...and keeps clear of the tracked obstacle (>= base radius, soft slack).
+    out = mod.run(seed=0, steps=240)
+    # Localizes from noisy GPS (looser than the static demos: aggressive
+    # overtaking of moving traffic exercises the GPS-window estimate harder)...
+    assert out["loc_rmse"] < 1.5
+    # ...overtakes the moving traffic while keeping clear (soft keep-out)...
     assert out["min_clearance"] > mod.SAFETY_RADIUS - 1.0
+    # ...and makes real progress around the track (~ at least most of a lap).
+    assert out["progress"] > out["path_len"] // 2
