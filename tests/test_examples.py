@@ -32,6 +32,18 @@ def test_tracking_smoothing_beats_raw():
     assert out["rmse_smoothed"] < 0.5
 
 
+def test_localization_control_coupling_mhe_beats_raw():
+    mod = importlib.import_module("examples.loc_control_sim")
+    mhe = mod.run(seed=0, steps=250, gps_sigma=1.0, use_estimate=True)
+    raw = mod.run(seed=0, steps=250, gps_sigma=1.0, use_estimate=False)
+    # Fusing the motion model with a window of GPS fixes cuts localization error...
+    assert mhe["loc_rmse"] < 0.6 * raw["loc_rmse"]
+    # ...and keeps the car on the path, where the raw-GPS controller diverges
+    # (no heading sensor -> heading from noisy GPS deltas is unusable).
+    assert mhe["cte_mean"] < 1.0
+    assert mhe["cte_mean"] < raw["cte_mean"]
+
+
 def test_integrated_tracks_and_avoids():
     mod = importlib.import_module("examples.integrated_sim")
     out = mod.run(frames=70, seed=0)
