@@ -44,6 +44,18 @@ def test_localization_control_coupling_mhe_beats_raw():
     assert mhe["cte_mean"] < raw["cte_mean"]
 
 
+def test_joint_single_graph_matches_pipeline():
+    jt = importlib.import_module("examples.joint_loc_control_sim")
+    lc = importlib.import_module("examples.loc_control_sim")
+    joint = jt.run(seed=0, steps=200, gps_sigma=1.0)
+    pipe = lc.run(seed=0, steps=200, gps_sigma=1.0, use_estimate=True)
+    # The unified single-optimize() graph stays on the path...
+    assert joint["cte_mean"] < 1.0
+    # ...and localizes about as well as the two-graph pipeline (the past/future
+    # coupling is weak for a deterministic model, so they should be close).
+    assert joint["loc_rmse"] < 1.5 * pipe["loc_rmse"]
+
+
 def test_integrated_tracks_and_avoids():
     mod = importlib.import_module("examples.integrated_sim")
     out = mod.run(frames=70, seed=0)
