@@ -203,22 +203,29 @@ class JointLocTrackControl(JointEstimatorMPC):
         safety_radius: Base keep-out radius.
         obstacle_weight: Barrier precision of the keep-out penalty.
         n_sigma: Covariance inflation: ``radius = safety_radius + n_sigma * std``.
-        obs_proc_sigma, obs_meas_sigma, obs_anchor_sigma: Obstacle CV process /
-            detection / window-anchor noise.
+        obs_proc_sigma, obs_anchor_sigma: Obstacle CV process / window-anchor noise.
+        obs_sigma_near, obs_sigma_rate, obs_sigma_max: Range-dependent detection
+            noise -- a detection's sigma is
+            ``min(obs_sigma_max, obs_sigma_near + obs_sigma_rate * range)``, so a
+            nearby obstacle is observed more strongly (smaller sigma) than a far
+            one, which in turn shrinks its track covariance and keep-out margin.
         **kwargs: Forwarded to :class:`JointEstimatorMPC`.
     """
 
     def __init__(self, n_obstacles: int, safety_radius: float = 3.0,
                  obstacle_weight: float = 400.0, n_sigma: float = 2.0,
-                 obs_proc_sigma=(0.05, 0.05, 0.4, 0.4), obs_meas_sigma: float = 0.6,
-                 obs_anchor_sigma: float = 10.0, **kwargs):
+                 obs_proc_sigma=(0.05, 0.05, 0.4, 0.4), obs_anchor_sigma: float = 10.0,
+                 obs_sigma_near: float = 0.25, obs_sigma_rate: float = 0.045,
+                 obs_sigma_max: float = 1.2, **kwargs):
         super().__init__(**kwargs)
         self.M = int(n_obstacles)
         self.safety_radius = float(safety_radius)
         self.obstacle_weight = float(obstacle_weight)
         self.n_sigma = float(n_sigma)
         self.obs_proc = factors.sigmas(obs_proc_sigma)
-        self.obs_meas = factors.isotropic(2, obs_meas_sigma)
+        self.obs_sigma_near = float(obs_sigma_near)
+        self.obs_sigma_rate = float(obs_sigma_rate)
+        self.obs_sigma_max = float(obs_sigma_max)
         self.obs_anchor = factors.isotropic(4, obs_anchor_sigma)
         self.obs_barrier = factors.precisions([obstacle_weight])
         self.Fp = _cv_matrix(self.est.model.dt)   # plant-rate CV (window)
@@ -249,8 +256,15 @@ class JointLocTrackControl(JointEstimatorMPC):
                 graph.add(factors.linear_motion(_obs_key(j, t), _obs_key(j, t + 1),
                                                  self.Fm, self.obs_proc))
             for t in range(lo, k + 1):
-                graph.add(factors.position_measurement(_obs_key(j, t),
-                                                        self.Odet[j][t], self.obs_meas))
+                # Range-dependent sensor: a detection is trusted more (smaller
+                # sigma) the closer the obstacle was to the ego when observed.
+                dist = float(np.linalg.norm(self.Xv[t][:2] - self.Odet[j][t]))
+                graph.add(factors.position_measurement(
+                    _obs_key(j, t), self.Odet[j][t], self._det_noise(dist)))
+
+    def _det_noise(self, dist: float):
+        sigma = min(self.obs_sigma_max, self.obs_sigma_near + self.obs_sigma_rate * dist)
+        return factors.isotropic(2, sigma)
 
     def _add_keepout_factors(self, graph) -> None:
         k, N = self.k, self.N

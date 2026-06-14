@@ -43,7 +43,11 @@ SAFETY_RADIUS = 3.0
 N_SIGMA = 1.5
 GPS_SIGMA = 0.3
 SPEED_SIGMA = 0.3
-OBS_DET_SIGMA = 0.6
+# Range-dependent detection noise (matches JointLocTrackControl's sensor model):
+# a closer obstacle is detected more accurately, so it is observed more strongly.
+DET_SIGMA_NEAR = 0.25
+DET_SIGMA_RATE = 0.045
+DET_SIGMA_MAX = 1.2
 TARGET_SPEED = 8.0
 WHEELBASE = pf.WHEELBASE
 
@@ -62,6 +66,11 @@ def _cov_ellipse_points(center, cov, n_sigma=2.0, k=24):
     axes = n_sigma * np.sqrt(vals)
     return [center + vecs @ (axes * np.array([np.cos(a), np.sin(a)]))
             for a in np.linspace(0.0, 2 * np.pi, k, endpoint=False)]
+
+
+def _det_sigma(dist: float) -> float:
+    """Detection 1-sigma grows with range: closer obstacles are seen better."""
+    return min(DET_SIGMA_MAX, DET_SIGMA_NEAR + DET_SIGMA_RATE * dist)
 
 
 def _tangent_normal(path, idx):
@@ -134,7 +143,8 @@ def run(seed: int = 0, steps: int = 240, gps_sigma: float = GPS_SIGMA,
         true = plant.step(true, u)
         gps = true[:2] + rng.normal(0.0, gps_sigma, 2)
         v_meas = true[3] + rng.normal(0.0, SPEED_SIGMA)
-        dets = [o.position() + rng.normal(0.0, OBS_DET_SIGMA, 2) for o in obs]
+        dets = [o.position() + rng.normal(0.0, _det_sigma(np.linalg.norm(true[:2] - o.position())), 2)
+                for o in obs]
         near = paths.nearest_index(path, estimate[:2])
         refs = paths.reference_trajectory(path, curv, near, TARGET_SPEED, jtc.N, pf.MPC_DT)
         estimate, _s, ctrls, _oe, _op = jtc.step(u, gps, v_meas, dets, refs)
@@ -208,7 +218,8 @@ def main() -> None:
             true = plant.step(true, u)
             gps = true[:2] + rng.normal(0.0, GPS_SIGMA, 2)
             v_meas = true[3] + rng.normal(0.0, SPEED_SIGMA)
-            dets = [o.position() + rng.normal(0.0, OBS_DET_SIGMA, 2) for o in obs]
+            dets = [o.position() + rng.normal(0.0, _det_sigma(np.linalg.norm(true[:2] - o.position())), 2)
+                    for o in obs]
             near = paths.nearest_index(path, estimate[:2])
             refs = paths.reference_trajectory(path, curv, near, TARGET_SPEED, jtc.N, pf.MPC_DT)
             estimate, states, ctrls, oest, opred = jtc.step(u, gps, v_meas, dets, refs)
