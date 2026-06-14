@@ -211,6 +211,27 @@ def nearest_index(path: np.ndarray, p: np.ndarray) -> int:
     return int(np.argmin(np.sum((path - p) ** 2, axis=1)))
 
 
+def cross_track_error(path: np.ndarray, p: np.ndarray) -> float:
+    """Perpendicular distance from ``p`` to the path polyline.
+
+    Uses the nearest vertex and projects onto its two adjacent segments, so the
+    result is the true lateral offset -- not the (quantized, partly along-track)
+    distance to the nearest discrete vertex.
+    """
+    i = nearest_index(path, p)
+    n = len(path)
+    best = float(np.linalg.norm(p - path[i]))
+    for j in (i - 1, i):
+        a, b = path[j % n], path[(j + 1) % n]
+        ab = b - a
+        denom = float(ab @ ab)
+        if denom < 1e-12:
+            continue
+        t = np.clip((p - a) @ ab / denom, 0.0, 1.0)
+        best = min(best, float(np.linalg.norm(p - (a + t * ab))))
+    return best
+
+
 def _curve_speed(kappa: float, speed: float) -> float:
     """Speed capped so curvature ``kappa`` stays within the lateral-accel limit."""
     if kappa <= 1e-4:
@@ -278,7 +299,7 @@ def reset_on_path(path: np.ndarray, speed: float) -> np.ndarray:
     return np.array([path[0, 0], path[0, 1], heading, speed])
 
 
-def draw_scene(surface, font, path, state, plan, near, refs,
+def draw_scene(surface, font, path, state, plan, refs,
                path_name, target_speed, trail, paused=False) -> None:
     """Render one frame: path, trail, predicted plan, reference and car + HUD."""
     surface.fill(BG)
@@ -300,7 +321,7 @@ def draw_scene(surface, font, path, state, plan, near, refs,
 
     draw_car(surface, state, float(plan.controls[0, 1]))
 
-    cross_track = float(np.linalg.norm(state[:2] - path[near]))
+    cross_track = cross_track_error(path, state[:2])
     lines = [
         f"path: {path_name}   target speed={target_speed:.1f} m/s   v={state[3]:+.2f} m/s",
         f"cross-track err={cross_track:.2f} m   a={plan.controls[0,0]:+.2f}   "
@@ -379,7 +400,7 @@ def main() -> None:
             if len(trail) > 400:
                 trail.pop(0)
 
-        draw_scene(screen, font, path, state, plan, near, refs,
+        draw_scene(screen, font, path, state, plan, refs,
                    path_name, target_speed, trail, paused)
         pygame.display.flip()
         clock.tick(FPS)
