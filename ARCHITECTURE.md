@@ -35,8 +35,9 @@ gtsam_mpc/
                      MovingHorizonEstimator    (sliding-window bicycle MHE)
                      ConstantVelocityTracker   (linear CV smoother + predictor)
 
-  joint.py         JointEstimatorMPC -- estimation window + control horizon in
-                   one NonlinearFactorGraph, solved with a single optimize()
+  joint.py         JointEstimatorMPC      -- estimation window + control horizon
+                   JointLocTrackControl   -- + obstacle tracking & uncertainty-
+                                             aware avoidance, all in one graph
 
   paths.py         Reference paths + path-tracking geometry (pure NumPy)
                      circle/figure_eight/sine_wave/racetrack/rounded_square,

@@ -24,7 +24,7 @@ from .constraints import (
 )
 from .control import BicycleMPC, LinearMPC, MPCResult
 from .estimation import ConstantVelocityTracker, MovingHorizonEstimator
-from .joint import JointEstimatorMPC
+from .joint import JointEstimatorMPC, JointLocTrackControl
 from .models import BicycleModel, LinearSystem, double_integrator, point_mass_2d
 
 __all__ = [
@@ -49,6 +49,7 @@ __all__ = [
     "ConstantVelocityTracker",
     # joint
     "JointEstimatorMPC",
+    "JointLocTrackControl",
     # submodules
     "factors",
     "paths",

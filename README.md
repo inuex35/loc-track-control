@@ -253,7 +253,9 @@ The suite validates the factor-graph solution against an independent finite-hori
 - **`MovingHorizonEstimator(model, window, gps_sigma, ...)`** — `.reset(x0)`, `.update(u, gps, v) -> state`.
 - **`ConstantVelocityTracker(dt, process_sigma, meas_sigma)`** — `.smooth(detections)`, `.estimate(detections)`, `.predict(state, horizon, dt=None)`.
 
-**Joint** (`gtsam_mpc.joint`): **`JointEstimatorMPC(...)`** — estimation window + control horizon in one graph; `.reset(x0)`, `.step(u, gps, v, reference) -> (estimate, states, controls)`.
+**Joint** (`gtsam_mpc.joint`):
+- **`JointEstimatorMPC(...)`** — estimation window + control horizon in one graph; `.reset(x0)`, `.step(u, gps, v, reference) -> (estimate, states, controls)`.
+- **`JointLocTrackControl(n_obstacles, safety_radius, n_sigma, ...)`** — localization + obstacle tracking + control in a *single* graph, with the keep-out radius inflated by each obstacle track's covariance (uncertainty-aware avoidance); `.reset(x0, obstacles)`, `.step(u, gps, v, detections, reference) -> (estimate, states, controls, obstacle_estimates, obstacle_predictions)`. Demo: `examples/loc_track_control_sim.py`.
 
 **Factors / paths** (`gtsam_mpc.factors`, `gtsam_mpc.paths`): the reusable `CustomFactor` vocabulary and path geometry (`make_path`, `path_curvature`, `reference_trajectory`, `cross_track_error`, …). See [ARCHITECTURE.md](ARCHITECTURE.md).
 

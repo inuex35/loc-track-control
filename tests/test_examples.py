@@ -63,3 +63,14 @@ def test_integrated_tracks_and_avoids():
     assert out["min_clearance"] > mod.SAFETY_RADIUS - 0.5
     # ...and still reached the goal.
     assert out["goal_dist"] < 2.0
+
+
+def test_loc_track_control_single_graph():
+    mod = importlib.import_module("examples.loc_track_control_sim")
+    out = mod.run(seed=1, steps=110)
+    # Localizes from noisy GPS...
+    assert out["loc_rmse"] < 1.0
+    # ...stays on the path...
+    assert out["cte"] < 1.5
+    # ...and keeps clear of the tracked obstacle (>= base radius, soft slack).
+    assert out["min_clearance"] > mod.SAFETY_RADIUS - 1.0

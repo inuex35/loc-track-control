@@ -98,6 +98,47 @@ def motion(model, kx, kx_next, u: np.ndarray, noise) -> gtsam.CustomFactor:
     return gtsam.CustomFactor(noise, [kx, kx_next], error)
 
 
+def linear_motion(ki, kj, F: np.ndarray, noise) -> gtsam.CustomFactor:
+    """Binary linear motion ``x_j - F x_i = 0`` (e.g. a constant-velocity prior)."""
+    F = np.asarray(F, dtype=float)
+    n = F.shape[0]
+
+    def error(this, values, H):
+        xi = values.atVector(this.keys()[0])
+        xj = values.atVector(this.keys()[1])
+        if H is not None:
+            H[0] = -F
+            H[1] = np.eye(n)
+        return xj - F @ xi
+
+    return gtsam.CustomFactor(noise, [ki, kj], error)
+
+
+def keepout(kx, ko, radius: float, noise, dim: int = 4) -> gtsam.CustomFactor:
+    """Soft keep-out between ego ``kx`` and obstacle ``ko``: residual ``max(0, r - dist)``.
+
+    The Jacobian acts on the *ego* state only; the obstacle's Jacobian is zero so
+    the keep-out shapes the ego plan without bending the obstacle's estimate
+    (the obstacle does not avoid the ego). ``radius`` may be inflated by the
+    obstacle's positional uncertainty for uncertainty-aware avoidance.
+    """
+    def error(this, values, H):
+        x = values.atVector(this.keys()[0])
+        o = values.atVector(this.keys()[1])
+        d = x[:2] - o[:2]
+        dist = float(np.hypot(d[0], d[1]))
+        if H is not None:
+            Jx = np.zeros((1, dim))
+            if dist < radius and dist > 1e-6:
+                Jx[0, 0] = -d[0] / dist
+                Jx[0, 1] = -d[1] / dist
+            H[0] = Jx
+            H[1] = np.zeros((1, dim))   # obstacle estimate is not bent by avoidance
+        return np.array([max(0.0, radius - dist)])
+
+    return gtsam.CustomFactor(noise, [kx, ko], error)
+
+
 def state_cost(key, target: np.ndarray, noise, wrap_index: int | None = 2):
     """Quadratic cost on the tracking error ``x - target``.
 

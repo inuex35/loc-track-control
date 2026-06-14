@@ -21,10 +21,26 @@ import gtsam
 import numpy as np
 from gtsam.symbol_shorthand import U, X
 
+import gtsam as _gtsam
+
 from . import factors
 from .constraints import Inequality, barrier_factor
 from .estimation import MovingHorizonEstimator
 from .models import BicycleModel
+
+# Obstacle state keys: char 'o', index encodes (obstacle, time) without colliding
+# with the ego X/U keys. (Assumes fewer than _OBS_STRIDE simulation steps.)
+_OBS_STRIDE = 100_000_000
+
+
+def _obs_key(j: int, t: int) -> int:
+    return _gtsam.symbol("o", j * _OBS_STRIDE + t)
+
+
+def _cv_matrix(dt: float) -> np.ndarray:
+    return np.array([[1, 0, dt, 0], [0, 1, 0, dt],
+                     [0, 0, 1, 0], [0, 0, 0, 1]], dtype=float)
+
 
 # Defaults reproduce the path-following controller tuning.
 _DEFAULT_Q = np.diag([4.0, 4.0, 1.5, 0.6])
@@ -97,25 +113,24 @@ class JointEstimatorMPC:
 
         return Inequality(key, 4, ev)
 
-    def step(self, u_applied, gps, v_meas, reference):
-        """One joint solve. Returns ``(estimate, plan_states, plan_controls)``."""
-        e = self.est
+    # --- graph assembly broken into reusable pieces (shared with subclasses) ---
+    def _push(self, u_applied, gps, v_meas) -> tuple[int, int]:
+        """Advance the time index, record measurements, roll the warm-start guess."""
         self.controls.append(np.asarray(u_applied, float).copy())
         self.gps.append(np.asarray(gps, float).copy())
         self.vmeas.append(float(v_meas))
         self.k += 1
-        k, N, W = self.k, self.N, self.W
-        lo = max(0, k - W)
-
-        # Warm-start guesses: predict the new current state, roll the horizon.
+        k, N = self.k, self.N
         self.Xv[k] = self.model.step(self.Xv[k - 1], u_applied)
         for t in range(k, k + N):
             self.Uv.setdefault(t, np.zeros(2))
         for t in range(k + 1, k + N + 1):
             self.Xv.setdefault(t, self.model.step(self.Xv[t - 1], self.Uv[t - 1]))
+        return k, max(0, k - self.W)
 
-        graph = gtsam.NonlinearFactorGraph()
-        # --- estimation window (past + current) ---
+    def _add_ego_factors(self, graph, lo, reference) -> None:
+        """Estimation window (past + current) + control horizon (current + future)."""
+        e, k, N = self.est, self.k, self.N
         graph.add(factors.prior(X(lo), self.Xv[lo], e.anchor_noise))
         for t in range(lo, k):
             graph.add(factors.motion(e.model, X(t), X(t + 1),
@@ -123,34 +138,184 @@ class JointEstimatorMPC:
         for t in range(lo, k + 1):
             graph.add(factors.position_measurement(X(t), self.gps[t], e.gps_noise))
             graph.add(factors.scalar_measurement(X(t), self.vmeas[t], e.speed_noise))
-        # --- control horizon (current + future) ---
         for t in range(k, k + N):
             graph.add(factors.dynamics(self.model, X(t), U(t), X(t + 1), self.constrained))
             graph.add(factors.zero_cost(U(t), 2, self.cost_u))
             graph.add(barrier_factor(self._u_inequality(U(t)), self.barrier_weight))
-        for j in range(1, N + 1):                 # X(k+1..k+N) track the reference
+        for j in range(1, N + 1):
             noise = self.cost_xf if j == N else self.cost_x
             graph.add(factors.state_cost(X(k + j), reference[j], noise))
 
-        values = gtsam.Values()
+    def _insert_ego_values(self, values, lo) -> None:
+        k, N = self.k, self.N
         for t in range(lo, k + N + 1):
             values.insert(X(t), self.Xv[t])
         for t in range(k, k + N):
             values.insert(U(t), self.Uv[t])
 
-        result = gtsam.LevenbergMarquardtOptimizer(graph, values, self._params).optimize()
-
+    def _extract_ego(self, result, lo):
+        k, N = self.k, self.N
         for t in range(lo, k + N + 1):
             self.Xv[t] = result.atVector(X(t))
         for t in range(k, k + N):
             self.Uv[t] = result.atVector(U(t))
-        # Prune values that have fallen out of both windows.
         for t in [t for t in self.Xv if t < lo]:
             del self.Xv[t]
         for t in [t for t in self.Uv if t < k]:
             del self.Uv[t]
-
         self.estimate = self.Xv[k].copy()
         states = np.array([self.Xv[k + j] for j in range(N + 1)])
         controls = np.array([self.Uv[k + t] for t in range(N)])
+        return states, controls
+
+    def step(self, u_applied, gps, v_meas, reference):
+        """One joint solve. Returns ``(estimate, plan_states, plan_controls)``."""
+        k, lo = self._push(u_applied, gps, v_meas)
+        graph = gtsam.NonlinearFactorGraph()
+        self._add_ego_factors(graph, lo, reference)
+        values = gtsam.Values()
+        self._insert_ego_values(values, lo)
+        result = gtsam.LevenbergMarquardtOptimizer(graph, values, self._params).optimize()
+        states, controls = self._extract_ego(result, lo)
         return self.estimate, states, controls
+
+
+class JointLocTrackControl(JointEstimatorMPC):
+    """Localization + obstacle tracking + control in a single factor graph.
+
+    Extends :class:`JointEstimatorMPC` with, in the *same* graph and the *same*
+    ``optimize()`` call:
+
+        * each obstacle ``j`` tracked as constant-velocity states ``O(j, t)`` over
+          the estimation window (with detection factors) and predicted forward
+          over the control horizon (motion factors only), and
+        * keep-out factors between each ego horizon node and the corresponding
+          obstacle node -- one-sided, with the Jacobian on the ego only so the
+          avoidance shapes the plan without bending the obstacle estimate.
+
+    The keep-out radius is *uncertainty-aware*: after each solve the obstacle
+    nodes' marginal position covariance is read with ``gtsam.Marginals`` and used
+    to inflate the radius for the next solve (a one-step lag), so the car gives a
+    wider berth to obstacles whose track is uncertain.
+
+    Args:
+        n_obstacles: Number of tracked obstacles ``M`` (known data association).
+        safety_radius: Base keep-out radius.
+        obstacle_weight: Barrier precision of the keep-out penalty.
+        n_sigma: Covariance inflation: ``radius = safety_radius + n_sigma * std``.
+        obs_proc_sigma, obs_meas_sigma, obs_anchor_sigma: Obstacle CV process /
+            detection / window-anchor noise.
+        **kwargs: Forwarded to :class:`JointEstimatorMPC`.
+    """
+
+    def __init__(self, n_obstacles: int, safety_radius: float = 3.0,
+                 obstacle_weight: float = 400.0, n_sigma: float = 2.0,
+                 obs_proc_sigma=(0.05, 0.05, 0.4, 0.4), obs_meas_sigma: float = 0.6,
+                 obs_anchor_sigma: float = 10.0, **kwargs):
+        super().__init__(**kwargs)
+        self.M = int(n_obstacles)
+        self.safety_radius = float(safety_radius)
+        self.obstacle_weight = float(obstacle_weight)
+        self.n_sigma = float(n_sigma)
+        self.obs_proc = factors.sigmas(obs_proc_sigma)
+        self.obs_meas = factors.isotropic(2, obs_meas_sigma)
+        self.obs_anchor = factors.isotropic(4, obs_anchor_sigma)
+        self.obs_barrier = factors.precisions([obstacle_weight])
+        self.Fp = _cv_matrix(self.est.model.dt)   # plant-rate CV (window)
+        self.Fm = _cv_matrix(self.model.dt)        # mpc-rate CV (horizon)
+
+    def reset(self, x0: np.ndarray, obstacles) -> None:
+        """Reset with the ego state and the initial obstacle states/positions."""
+        super().reset(x0)
+        self.Ov = {}        # Ov[j][t] : warm-start obstacle state
+        self.Odet = {}      # Odet[j][t] : obstacle position detection at step t
+        for j, o in enumerate(obstacles):
+            o = np.asarray(o, float)
+            state = o if o.shape == (4,) else np.array([o[0], o[1], 0.0, 0.0])
+            self.Ov[j] = {0: state.copy()}
+            self.Odet[j] = [state[:2].copy()]
+        # std[(j, i)] : obstacle position std at horizon step i, from last solve.
+        self.std = {}
+
+    def _add_obstacle_factors(self, graph, lo) -> None:
+        k, N = self.k, self.N
+        for j in range(self.M):
+            graph.add(factors.prior(_obs_key(j, lo), self.Ov[j][lo], self.obs_anchor))
+            for t in range(lo, k):       # window: plant-rate constant velocity
+                graph.add(factors.linear_motion(_obs_key(j, t), _obs_key(j, t + 1),
+                                                 self.Fp, self.obs_proc))
+            for t in range(k, k + N):    # horizon: mpc-rate prediction
+                graph.add(factors.linear_motion(_obs_key(j, t), _obs_key(j, t + 1),
+                                                 self.Fm, self.obs_proc))
+            for t in range(lo, k + 1):
+                graph.add(factors.position_measurement(_obs_key(j, t),
+                                                        self.Odet[j][t], self.obs_meas))
+
+    def _add_keepout_factors(self, graph) -> None:
+        k, N = self.k, self.N
+        for j in range(self.M):
+            for i in range(N + 1):
+                radius = self.safety_radius + self.n_sigma * self.std.get((j, i), 0.0)
+                graph.add(factors.keepout(X(k + i), _obs_key(j, k + i),
+                                          radius, self.obs_barrier))
+
+    def _push_obstacles(self, detections, lo) -> None:
+        k, N = self.k, self.N
+        for j in range(self.M):
+            self.Odet[j].append(np.asarray(detections[j], float))
+            self.Ov[j][k] = self.Fp @ self.Ov[j][k - 1]      # new window node
+            for t in range(k + 1, k + N + 1):                # predicted horizon
+                self.Ov[j][t] = self.Fm @ self.Ov[j][t - 1]
+            for t in [t for t in self.Ov[j] if t < lo]:
+                del self.Ov[j][t]
+
+    def _update_radii(self, graph, result) -> None:
+        """Read obstacle marginal covariance -> per-horizon position std (next solve)."""
+        k, N = self.k, self.N
+        try:
+            marg = _gtsam.Marginals(graph, result)
+        except Exception:
+            return
+        for j in range(self.M):
+            for i in range(N + 1):
+                try:
+                    cov = marg.marginalCovariance(_obs_key(j, k + i))[:2, :2]
+                    self.std[(j, i)] = float(np.sqrt(max(np.linalg.eigvalsh(cov)[-1], 0.0)))
+                except Exception:
+                    self.std[(j, i)] = 0.0
+
+    def step(self, u_applied, gps, v_meas, detections, reference):
+        """One joint solve over ego + obstacles + control.
+
+        Returns ``(estimate, plan_states, plan_controls, obstacle_estimates,
+        obstacle_predictions)`` where the last two are per-obstacle current
+        states and ``(horizon + 1, 2)`` predicted position trajectories.
+        """
+        k, lo = self._push(u_applied, gps, v_meas)
+        self._push_obstacles(detections, lo)
+
+        graph = gtsam.NonlinearFactorGraph()
+        self._add_ego_factors(graph, lo, reference)
+        self._add_obstacle_factors(graph, lo)
+        self._add_keepout_factors(graph)
+
+        values = gtsam.Values()
+        self._insert_ego_values(values, lo)
+        for j in range(self.M):
+            for t in range(lo, k + self.N + 1):
+                values.insert(_obs_key(j, t), self.Ov[j][t])
+
+        result = gtsam.LevenbergMarquardtOptimizer(graph, values, self._params).optimize()
+
+        states, controls = self._extract_ego(result, lo)
+        for j in range(self.M):
+            for t in range(lo, k + self.N + 1):
+                self.Ov[j][t] = result.atVector(_obs_key(j, t))
+        self._update_radii(graph, result)
+
+        obstacle_estimates = {j: self.Ov[j][k].copy() for j in range(self.M)}
+        obstacle_predictions = {
+            j: np.array([self.Ov[j][k + i][:2] for i in range(self.N + 1)])
+            for j in range(self.M)
+        }
+        return self.estimate, states, controls, obstacle_estimates, obstacle_predictions
