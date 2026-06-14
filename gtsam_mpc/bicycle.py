@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 import gtsam
 import numpy as np
-from gtsam.symbol_shorthand import U, X
+from gtsam.symbol_shorthand import S, U, X
 
 from .mpc import MPCResult, _require_pd
 
@@ -189,8 +189,12 @@ class BicycleMPC:
             penalty (soft, weight-tuned). ``"al"`` is the Augmented Lagrangian
             method: an outer loop updates per-constraint multipliers so the
             bounds are satisfied tightly without hand-tuning the penalty weight.
-            Dynamics and the initial condition stay hard equality constraints in
-            both modes.
+            ``"slack"`` turns each inequality ``g <= 0`` into the hard equality
+            ``g + s^2 = 0`` with a slack variable ``s``, so *all* constraints
+            become equalities solved inside a single GTSAM ``optimize()`` -- no
+            Python outer loop and no manual multipliers (GTSAM's elimination
+            yields them implicitly). Dynamics and the initial condition are hard
+            equality constraints in every mode.
         barrier_weight: Penalty precision in ``"barrier"`` mode (larger = closer
             to a hard limit). Unused in ``"al"`` mode.
         al_iterations: Number of outer Augmented-Lagrangian iterations.
@@ -224,9 +228,10 @@ class BicycleMPC:
     ) -> None:
         if horizon < 1:
             raise ValueError(f"horizon must be >= 1, got {horizon}")
-        if constraint_mode not in ("barrier", "al"):
+        if constraint_mode not in ("barrier", "al", "slack"):
             raise ValueError(
-                f"constraint_mode must be 'barrier' or 'al', got {constraint_mode!r}"
+                "constraint_mode must be 'barrier', 'al' or 'slack', got "
+                f"{constraint_mode!r}"
             )
         self.model = model
         self.horizon = int(horizon)
@@ -549,6 +554,58 @@ class BicycleMPC:
 
         return values
 
+    # --- slack-variable equality reformulation ---------------------------
+    @staticmethod
+    def _slack_eq_error(ev):
+        """Hard-equality residual ``g(x) + s^2`` for the slack reformulation.
+
+        Encodes the inequality ``g(x) <= 0`` as ``g(x) + s^2 = 0`` (so ``g`` is
+        forced non-positive). Jacobians: ``dg/dx`` for the constrained variable
+        and ``diag(2 s)`` for the slack.
+        """
+        def error(this, values, H):
+            x = values.atVector(this.keys()[0])
+            t = values.atVector(this.keys()[1])
+            g, J = ev(x)
+            if H is not None:
+                H[0] = J
+                H[1] = np.diag(2.0 * t)
+            return g + t * t
+
+        return error
+
+    def _solve_slack(
+        self,
+        x0: np.ndarray,
+        xref: np.ndarray,
+        obstacles: list[np.ndarray] | None,
+        initial: gtsam.Values,
+    ) -> gtsam.Values:
+        """Single GTSAM solve with inequalities turned into slack equalities."""
+        graph = self._build_base_graph(x0, xref)
+        specs = self._constraint_specs(obstacles)
+        values = gtsam.Values(initial)
+
+        for i, s in enumerate(specs):
+            m = s["lam"].shape[0]
+            key, ev = s["key"], s["ev"]
+            skey = S(i)
+            if not values.exists(skey):
+                # Initialize the slack so g + s^2 ~= 0 at the warm-start point.
+                g0, _ = ev(values.atVector(key))
+                values.insert(skey, np.sqrt(np.maximum(0.0, -g0)))
+            graph.add(
+                gtsam.CustomFactor(
+                    gtsam.noiseModel.Constrained.All(m),
+                    [key, skey],
+                    self._slack_eq_error(ev),
+                )
+            )
+
+        return gtsam.LevenbergMarquardtOptimizer(
+            graph, values, self._params
+        ).optimize()
+
     def _rollout_init(self, x0: np.ndarray) -> gtsam.Values:
         values = gtsam.Values()
         x = x0.copy()
@@ -595,6 +652,8 @@ class BicycleMPC:
 
         if self.constraint_mode == "al":
             result = self._solve_al(x0, xref, obs, initial)
+        elif self.constraint_mode == "slack":
+            result = self._solve_slack(x0, xref, obs, initial)
         else:
             graph = self._build_graph(x0, xref, obs)
             result = gtsam.LevenbergMarquardtOptimizer(

@@ -142,6 +142,19 @@ def test_al_respects_speed_bounds():
     assert v.max() <= 3.0 + 2e-2 and v.min() >= -1.0 - 2e-2
 
 
+def test_slack_single_solve_respects_bounds():
+    # The slack reformulation handles every constraint inside one GTSAM solve
+    # (no Python outer loop). It is tight on steering; the s^2 degeneracy at an
+    # active bound lets acceleration overshoot a little, hence the looser tol.
+    a_lim, d_lim = 2.0, 0.4
+    mpc = _default_mpc(a_bounds=(-a_lim, a_lim), delta_bounds=(-d_lim, d_lim),
+                       constraint_mode="slack")
+    result = mpc.simulate(np.zeros(4), np.array([15.0, 8.0, 0.0, 0.0]), steps=20)
+    a, delta = result.controls[:, 0], result.controls[:, 1]
+    assert a.max() <= a_lim + 0.15 and a.min() >= -a_lim - 0.15
+    assert delta.max() <= d_lim + 1e-2 and delta.min() >= -d_lim - 1e-2
+
+
 def test_al_avoids_static_obstacle():
     mpc = _default_mpc(v_bounds=(-2.0, 4.0), safety_radius=2.0,
                        constraint_mode="al")
