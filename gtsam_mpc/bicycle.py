@@ -39,58 +39,136 @@ def _wrap(angle: float) -> float:
 
 @dataclass
 class BicycleModel:
-    """Discrete-time kinematic bicycle model (forward-Euler integration).
+    """Discrete-time kinematic bicycle model (classic RK4 integration).
+
+    The continuous dynamics ``xdot = f(x, u)`` are integrated over ``dt`` with
+    the 4th-order Runge-Kutta rule. RK4 is ``O(dt^5)`` accurate per step versus
+    the ``O(dt^2)`` of forward Euler, which removes the systematic discretization
+    bias Euler introduces on curved motion (e.g. a steady cross-track offset
+    when tracking a circle), letting the MPC use a coarse prediction grid.
+
+    For extra accuracy on a coarse grid the ``dt`` interval can be split into
+    ``substeps`` equal RK4 sub-integrations (as acados does with
+    ``sim_method_num_steps``); the control ``u`` is held constant across them.
 
     Attributes:
         wheelbase: Distance between front and rear axles ``L`` [m].
         dt: Integration timestep [s].
+        substeps: Number of equal RK4 sub-integrations per :meth:`step`.
     """
 
     wheelbase: float = 2.5
     dt: float = 0.1
+    substeps: int = 1
 
     n_states: int = 4
     n_controls: int = 2
 
-    def step(self, x: np.ndarray, u: np.ndarray) -> np.ndarray:
-        """Propagate one step with forward Euler."""
-        x = np.asarray(x, dtype=float)
-        u = np.asarray(u, dtype=float)
-        px, py, theta, v = x
+    def _f(self, x: np.ndarray, u: np.ndarray) -> np.ndarray:
+        """Continuous-time dynamics ``xdot = f(x, u)``."""
+        _, _, theta, v = x
         a, delta = u
-        dt, L = self.dt, self.wheelbase
+        L = self.wheelbase
         return np.array(
-            [
-                px + dt * v * np.cos(theta),
-                py + dt * v * np.sin(theta),
-                theta + dt * (v / L) * np.tan(delta),
-                v + dt * a,
-            ]
+            [v * np.cos(theta), v * np.sin(theta), (v / L) * np.tan(delta), a]
         )
 
-    def jacobians(self, x: np.ndarray, u: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``(df/dx, df/du)`` of :meth:`step` at ``(x, u)``."""
-        _, _, theta, v = np.asarray(x, dtype=float)
-        _, delta = np.asarray(u, dtype=float)
-        dt, L = self.dt, self.wheelbase
+    def _f_jac(self, x: np.ndarray, u: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Continuous Jacobians ``(df/dx, df/du)`` of :meth:`_f`."""
+        _, _, theta, v = x
+        _, delta = u
+        L = self.wheelbase
         c, s = np.cos(theta), np.sin(theta)
-        dfdx = np.array(
+        Ac = np.array(
             [
-                [1.0, 0.0, -dt * v * s, dt * c],
-                [0.0, 1.0, dt * v * c, dt * s],
-                [0.0, 0.0, 1.0, dt * np.tan(delta) / L],
-                [0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, -v * s, c],
+                [0.0, 0.0, v * c, s],
+                [0.0, 0.0, 0.0, np.tan(delta) / L],
+                [0.0, 0.0, 0.0, 0.0],
             ]
         )
-        dfdu = np.array(
+        Bc = np.array(
             [
                 [0.0, 0.0],
                 [0.0, 0.0],
-                [0.0, dt * v / (L * np.cos(delta) ** 2)],
-                [dt, 0.0],
+                [0.0, v / (L * np.cos(delta) ** 2)],
+                [1.0, 0.0],
             ]
         )
-        return dfdx, dfdu
+        return Ac, Bc
+
+    def _rk4(self, x: np.ndarray, u: np.ndarray, h: float) -> np.ndarray:
+        """One classic RK4 sub-integration of size ``h``."""
+        k1 = self._f(x, u)
+        k2 = self._f(x + 0.5 * h * k1, u)
+        k3 = self._f(x + 0.5 * h * k2, u)
+        k4 = self._f(x + h * k3, u)
+        return x + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+    def _rk4_jac(
+        self, x: np.ndarray, u: np.ndarray, h: float
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Exact ``(d/dx, d/du)`` of one RK4 sub-integration :meth:`_rk4`.
+
+        Obtained by propagating the continuous Jacobians through the four RK4
+        stages by the chain rule.
+        """
+        eye = np.eye(4)
+        k1 = self._f(x, u)
+        s2 = x + 0.5 * h * k1
+        k2 = self._f(s2, u)
+        s3 = x + 0.5 * h * k2
+        k3 = self._f(s3, u)
+        s4 = x + h * k3
+
+        A1, B1 = self._f_jac(x, u)
+        A2, B2 = self._f_jac(s2, u)
+        A3, B3 = self._f_jac(s3, u)
+        A4, B4 = self._f_jac(s4, u)
+
+        # d k_i / dx, chained through each stage's state dependence on x.
+        Dk1 = A1
+        Dk2 = A2 @ (eye + 0.5 * h * Dk1)
+        Dk3 = A3 @ (eye + 0.5 * h * Dk2)
+        Dk4 = A4 @ (eye + h * Dk3)
+        A = eye + (h / 6.0) * (Dk1 + 2.0 * Dk2 + 2.0 * Dk3 + Dk4)
+
+        # d k_i / du, with each stage's state also depending on u via prior k's.
+        Ek1 = B1
+        Ek2 = A2 @ (0.5 * h * Ek1) + B2
+        Ek3 = A3 @ (0.5 * h * Ek2) + B3
+        Ek4 = A4 @ (h * Ek3) + B4
+        B = (h / 6.0) * (Ek1 + 2.0 * Ek2 + 2.0 * Ek3 + Ek4)
+
+        return A, B
+
+    def step(self, x: np.ndarray, u: np.ndarray) -> np.ndarray:
+        """Propagate one ``dt`` with RK4, split into ``substeps`` sub-steps."""
+        x = np.asarray(x, dtype=float)
+        u = np.asarray(u, dtype=float)
+        h = self.dt / self.substeps
+        for _ in range(self.substeps):
+            x = self._rk4(x, u, h)
+        return x
+
+    def jacobians(self, x: np.ndarray, u: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return ``(df/dx, df/du)`` of the full :meth:`step` at ``(x, u)``.
+
+        The per-sub-step Jacobians are composed across ``substeps`` by the chain
+        rule, so they match a finite difference of :meth:`step` to machine
+        precision regardless of how many sub-steps are used.
+        """
+        x = np.asarray(x, dtype=float)
+        u = np.asarray(u, dtype=float)
+        h = self.dt / self.substeps
+        Jx = np.eye(4)
+        Ju = np.zeros((4, 2))
+        for _ in range(self.substeps):
+            A, B = self._rk4_jac(x, u, h)
+            Ju = A @ Ju + B
+            Jx = A @ Jx
+            x = self._rk4(x, u, h)
+        return Jx, Ju
 
 
 class BicycleMPC:
@@ -231,6 +309,21 @@ class BicycleMPC:
 
         return error
 
+    def _normalize_xref(self, xref) -> np.ndarray:
+        """Reference -> a ``(horizon + 1, 4)`` array of per-step target states.
+
+        Accepts a single state ``(4,)`` (broadcast to every step) or a full
+        reference trajectory ``(horizon + 1, 4)``.
+        """
+        arr = np.asarray(xref, dtype=float)
+        if arr.shape == (4,):
+            return np.tile(arr, (self.horizon + 1, 1))
+        if arr.shape == (self.horizon + 1, 4):
+            return arr
+        raise ValueError(
+            f"xref must be shape (4,) or ({self.horizon + 1}, 4), got {arr.shape}"
+        )
+
     def _normalize_obstacles(self, obstacles) -> list[np.ndarray]:
         """Each obstacle -> a (horizon+1, 2) array of predicted centre positions.
 
@@ -275,7 +368,7 @@ class BicycleMPC:
                 )
             )
             graph.add(
-                gtsam.CustomFactor(cost_x, [X(k)], self._state_cost_error(xref))
+                gtsam.CustomFactor(cost_x, [X(k)], self._state_cost_error(xref[k]))
             )
             graph.add(gtsam.CustomFactor(cost_u, [U(k)], self._control_cost_error))
             graph.add(
@@ -293,7 +386,7 @@ class BicycleMPC:
                     gtsam.CustomFactor(v_barrier, [X(k)], self._box_error(lo, hi))
                 )
         graph.add(
-            gtsam.CustomFactor(cost_xf, [X(N)], self._state_cost_error(xref))
+            gtsam.CustomFactor(cost_xf, [X(N)], self._state_cost_error(xref[N]))
         )
 
         if obstacles:
@@ -326,11 +419,15 @@ class BicycleMPC:
         obstacles=None,
         warm_start: bool = True,
     ) -> MPCResult:
-        """Optimize the trajectory from ``x0`` toward target state ``xref``.
+        """Optimize the trajectory from ``x0`` toward the reference ``xref``.
 
         Args:
             x0: Current state ``[x, y, theta, v]``.
-            xref: Target state.
+            xref: Either a single target state ``(4,)`` applied at every horizon
+                step (set-point tracking), or a full reference trajectory of
+                shape ``(horizon + 1, 4)`` giving the desired state at each step
+                (path / trajectory tracking). The heading component is compared
+                on the wrapped error.
             obstacles: Optional iterable of obstacles to avoid. Each is either a
                 static centre ``(2,)`` or a per-horizon-step prediction
                 ``(horizon + 1, 2)`` (e.g. from a tracker). Avoidance is a soft
@@ -339,7 +436,7 @@ class BicycleMPC:
                 keeps re-optimization fast for closed-loop / interactive use.
         """
         x0 = np.asarray(x0, dtype=float).reshape(4)
-        xref = np.asarray(xref, dtype=float).reshape(4)
+        xref = self._normalize_xref(xref)
         obs = self._normalize_obstacles(obstacles) if obstacles else None
 
         graph = self._build_graph(x0, xref, obs)
