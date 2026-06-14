@@ -200,10 +200,14 @@ def make_controller() -> BicycleMPC:
     Q = np.diag([4.0, 4.0, 1.5, 0.6])
     R = np.diag([0.1, 0.1])
     Qf = np.diag([20.0, 20.0, 4.0, 2.0])
+    # Augmented Lagrangian keeps acceleration / steering / speed within their
+    # bounds tightly (no penalty-weight tuning); it converges in one outer
+    # iteration when, as here, the curvature-limited reference keeps inputs
+    # feasible, so it costs almost nothing until a bound actually binds.
     return BicycleMPC(
         model, Q=Q, R=R, horizon=MPC_HORIZON, Qf=Qf,
         a_bounds=A_BOUNDS, delta_bounds=DELTA_BOUNDS, v_bounds=V_BOUNDS,
-        barrier_weight=500.0,
+        constraint_mode="al",
     )
 
 
