@@ -177,6 +177,37 @@ def run(frames: int = 70, seed: int = 0) -> dict:
     }
 
 
+def iter_frames(frames: int, seed: int = 0):
+    """Yield a rendered surface per frame (headless), for GIF recording."""
+    pygame.init()
+    pygame.font.init()
+    surface = pygame.Surface((bsim.WIDTH, bsim.HEIGHT))
+    font = pygame.font.SysFont("monospace", 16)
+    rng = np.random.default_rng(seed)
+    mpc = make_controller()
+    model = mpc.model
+    ego = np.array([-22.0, 0.0, 0.0, 0.0])
+    goal_xy = np.array([22.0, 0.0])
+    obstacles = [
+        Obstacle((-2.0, -12.0), (0.3, 2.2)),
+        Obstacle((6.0, 12.0), (-0.4, -2.0)),
+    ]
+    for _ in range(frames):
+        for obs in obstacles:
+            obs.step(DT, rng)
+        predictions = [
+            predict_horizon(estimate_state(o.history, DT), HORIZON, DT)
+            for o in obstacles if len(o.history) > 0
+        ]
+        heading = np.arctan2(goal_xy[1] - ego[1], goal_xy[0] - ego[0])
+        xref = np.array([goal_xy[0], goal_xy[1], heading, 0.0])
+        plan = mpc.solve(ego, xref, obstacles=predictions)
+        ego = model.step(ego, plan.u0)
+        draw_scene(surface, font, ego, goal_xy, obstacles, predictions, plan)
+        yield surface
+    pygame.quit()
+
+
 def main() -> None:
     max_frames_env = os.environ.get("GTSAM_MPC_MAX_FRAMES")
     max_frames = int(max_frames_env) if max_frames_env else None

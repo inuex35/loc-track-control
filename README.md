@@ -2,267 +2,167 @@
 
 **Estimation, control and tracking** as **factor-graph optimization**, solved with [GTSAM](https://gtsam.org/).
 
-The package is organized around one idea: estimation, control and tracking are all maximum-a-posteriori (MAP) inference on factor graphs built from a shared vocabulary of factors. A finite-horizon linear-quadratic optimal control problem, for instance, is exactly MAP inference on a Gaussian factor graph — eliminating it is the classical Riccati recursion, expressed declaratively as factors.
+The package is built around one idea: **estimation, control and tracking are all maximum-a-posteriori (MAP) inference on factor graphs built from a shared vocabulary of factors.** A finite-horizon linear-quadratic optimal control problem, for instance, is exactly MAP inference on a Gaussian factor graph — eliminating it *is* the classical Riccati recursion, expressed declaratively as factors. The same factors are reused to localize the robot, track moving obstacles, and fuse everything into a single optimization.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the package layout (`models`, `factors`, `constraints`, `control`, `estimation`, `joint`, `paths`).
+See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the package layout (`models`, `factors`, `constraints`, `control`, `estimation`, `joint`, `paths`).
 
-Two MPC solvers are provided:
-
-| Solver           | System                          | Graph            | Constraints |
-| ---------------- | ------------------------------- | ---------------- | ----------- |
-| `LinearMPC`      | linear (`A`, `B`)               | Gaussian (LQR)   | equality only (dynamics + initial state) |
-| `BicycleMPC`     | nonlinear kinematic bicycle     | nonlinear (LM)   | equality + input/speed/obstacle inequalities via a strategy (barrier / augmented-Lagrangian / slack) |
-
-## The problem
-
-For a discrete-time linear system `x_{k+1} = A x_k + B u_k`, solve
-
-```
-minimize    sum_{k=0}^{N-1} ( x_kᵀ Q x_k + u_kᵀ R u_k ) + x_Nᵀ Qf x_N
-subject to  x_0 = x_init
-            x_{k+1} = A x_k + B u_k
-```
-
-## How it maps to a factor graph
-
-| MPC ingredient                       | Factor graph element                                  |
-| ------------------------------------ | ----------------------------------------------------- |
-| Initial state `x_0 = x_init`         | Hard equality constraint (`noiseModel.Constrained`)   |
-| Dynamics `x_{k+1} = A x_k + B u_k`   | Hard equality constraint linking `x_k`, `u_k`, `x_{k+1}` |
-| State cost `x_kᵀ Q x_k`              | Quadratic factor with information matrix `Q`          |
-| Control cost `u_kᵀ R u_k`           | Quadratic factor with information matrix `R`           |
-| Terminal cost `x_Nᵀ Qf x_N`         | Quadratic factor with information matrix `Qf`          |
-
-The MAP solution of the resulting Gaussian factor graph is exactly the optimal control sequence.
+| Solver / estimator | Problem | Graph |
+| ------------------ | ------- | ----- |
+| `LinearMPC`              | linear-quadratic MPC                          | Gaussian (= Riccati) |
+| `BicycleMPC`             | nonlinear kinematic-bicycle MPC               | nonlinear (LM); barrier / aug-Lagrangian / slack constraints |
+| `MovingHorizonEstimator` | sliding-window localization (MHE)             | nonlinear (LM) |
+| `ConstantVelocityTracker`| 2-D multi-object tracking / prediction        | Gaussian |
+| `JointEstimatorMPC`      | localization **+** control in one graph        | nonlinear (LM) |
+| `JointLocTrackControl`   | localization **+** tracking **+** control, one graph | nonlinear (LM), uncertainty-aware avoidance |
 
 ## Installation
 
 ```bash
 pip install -e .          # core (gtsam, numpy)
 pip install -e ".[dev]"   # + pytest
-pip install -e ".[plot]"  # + matplotlib for the example plot
-pip install -e ".[sim]"   # + pygame for the interactive simulation
+pip install -e ".[plot]"  # + matplotlib (example plots)
+pip install -e ".[sim]"   # + pygame (interactive demos / GIF recording)
 ```
 
-## Usage
+## Quickstart
 
-```python
-import numpy as np
-from gtsam_mpc import LinearMPC, double_integrator
-
-system = double_integrator(dt=0.1)          # state = [position, velocity]
-mpc = LinearMPC(
-    system,
-    Q=np.diag([1.0, 1.0]),                  # running state cost
-    R=np.array([[0.1]]),                    # running control cost
-    horizon=25,
-    Qf=np.diag([100.0, 100.0]),             # terminal cost
-)
-
-x0 = np.array([5.0, 0.0])
-
-# Open-loop optimal plan over the whole horizon:
-plan = mpc.solve(x0)
-print(plan.controls.shape)   # (25, 1)
-print(plan.states.shape)     # (26, 2)
-
-# One receding-horizon step (the control you'd actually apply):
-u = mpc.control(x0)
-
-# Full closed-loop simulation (re-optimize each step, apply first control):
-traj = mpc.simulate(x0, steps=60)
-```
-
-### Tracking a goal
-
-Pass `xref` to regulate toward a target state instead of the origin (exact when
-`xref` is an equilibrium, e.g. a zero-velocity position goal):
+### Linear MPC
 
 ```python
 import numpy as np
 from gtsam_mpc import LinearMPC, point_mass_2d
 
 mpc = LinearMPC(
-    point_mass_2d(dt=0.1),                       # state = [px, py, vx, vy]
+    point_mass_2d(dt=0.1),               # state = [px, py, vx, vy]
     Q=np.diag([4.0, 4.0, 0.5, 0.5]),
     R=np.diag([0.05, 0.05]),
     horizon=30,
     Qf=np.diag([40.0, 40.0, 4.0, 4.0]),
 )
-goal = np.array([3.0, -2.0, 0.0, 0.0])           # position goal, zero velocity
-u = mpc.control(np.zeros(4), xref=goal)
+goal = np.array([3.0, -2.0, 0.0, 0.0])   # position goal, zero velocity
+u = mpc.control(np.zeros(4), xref=goal)  # first control to apply
+traj = mpc.simulate(np.zeros(4), steps=60, xref=goal)
 ```
 
-## Example
+`xref` defaults to the origin; tracking is exact when it is an equilibrium (e.g. a zero-velocity goal). The whole problem is a *linear* Gaussian factor graph:
 
-```bash
-python examples/double_integrator.py
-```
+| MPC ingredient | Factor graph element |
+| -------------- | -------------------- |
+| Initial state `x_0 = x_init` | hard equality constraint |
+| Dynamics `x_{k+1} = A x_k + B u_k` | hard equality constraint on `x_k, u_k, x_{k+1}` |
+| State / control / terminal cost | quadratic factor with information `Q` / `R` / `Qf` |
 
-Drives a double integrator from `[5, 0]` to the origin and (if matplotlib is installed) saves `double_integrator.png`.
-
-### Interactive pygame simulation
-
-```bash
-python examples/pygame_sim.py
-```
-
-A 2-D point mass chases a goal under receding-horizon MPC, with the predicted
-horizon plan drawn ahead of it. **Left click** sets a new goal, **space**
-pauses, **r** resets, **esc** quits.
-
-```bash
-python examples/bicycle_sim.py
-```
-
-A car (nonlinear kinematic bicycle model) drives to a clickable goal under
-`BicycleMPC`, with steering and acceleration enforced as soft limits. Same key
-bindings.
-
-## Three factor-graph layers: estimation, control, tracking
-
-The same idea — *write the problem as factors and find the MAP estimate* —
-spans an entire autonomy stack. `examples/` has one self-contained sample per
-layer, echoing three reference projects:
-
-| Sample | Layer | Factor graph | Reference project |
-| ------ | ----- | ------------ | ----------------- |
-| `examples/localization.py` | 位置推定 (estimation) | Pose2 odometry (`BetweenFactor`) + GPS (`PriorFactor`) fusion | JPCM / IPN_MPC (positioning half) |
-| `examples/control.py`      | 制御 (control)        | receding-horizon MPC (Gaussian / LQR) | this package, JPCM (control half) |
-| `examples/tracking.py`     | トラッキング (perception) | constant-velocity motion prior + position measurements | FGO-MOT |
-
-```bash
-python examples/localization.py   # odometry drifts; GPS fusion tracks truth
-python examples/control.py        # point-mass MPC drives to a goal
-python examples/tracking.py       # smooths noisy multi-object detections
-```
-
-Each prints a metric showing the factor-graph estimate beats the naive
-baseline (fused vs dead-reckoning, smoothed vs raw detections) and, with
-matplotlib, saves a plot.
-
-### Integrated demo: track obstacles, then avoid them with MPC
-
-```bash
-python examples/integrated_sim.py
-```
-
-Wires all three layers into one pipeline — **perception → prediction → control**:
-
-1. Moving obstacles emit noisy **detections** each frame.
-2. A constant-velocity **factor-graph tracker** smooths each obstacle and
-   **predicts** its position over the MPC horizon.
-3. `BicycleMPC` drives the ego car to a (clickable) goal while **avoiding** each
-   predicted obstacle trajectory via soft keep-out (control-barrier-style)
-   factors within `safety_radius`.
-
-This mirrors the tightly-coupled estimation+control idea behind JPCM/IPN_MPC,
-with FGO-MOT-style tracking feeding the obstacle predictions.
-
-`BicycleMPC.solve` / `control` / `simulate` accept an `obstacles` argument — a
-list of static centres `(2,)` or per-step predictions `(horizon+1, 2)`:
-
-```python
-preds = [predicted_obstacle_xy]            # shape (horizon+1, 2) from a tracker
-u = mpc.control(ego_state, goal, obstacles=preds)
-```
-
-> The avoidance is **soft** (a penalty/barrier factor), so it strongly avoids
-> but does not *guarantee* a hard minimum distance — see the note on hard
-> constraints below.
-
-### Recording an animation (GIF)
-
-No display needed — render any of the pygame demos to an animated GIF:
-
-```bash
-python examples/make_gif.py integrated.gif --frames 90 --scale 0.6 --fps 20
-```
-
-This drives the integrated track-and-avoid demo headless and writes a GIF
-(handy for docs/CI where an interactive window isn't available).
-
-## Nonlinear bicycle MPC
-
-For the kinematic bicycle model
-
-```
-ẋ = v·cos θ,   ẏ = v·sin θ,   θ̇ = (v/L)·tan δ,   v̇ = a
-state = [x, y, θ, v],   control = [a, δ]
-```
-
-`BicycleMPC` builds a **nonlinear** factor graph: the discretized dynamics and
-costs are `gtsam.CustomFactor` factors with analytic Jacobians, optimized with
-Levenberg-Marquardt (warm-started between calls). Input limits `|a| ≤ a_max`,
-`|δ| ≤ δ_max` and optional speed limits are added as **soft barrier factors** —
-a one-sided quadratic penalty, zero inside the feasible box and growing with the
-violation, whose stiffness is set by `barrier_weight`.
+### Nonlinear bicycle MPC
 
 ```python
 import numpy as np
 from gtsam_mpc import BicycleMPC, BicycleModel
 
 mpc = BicycleMPC(
-    BicycleModel(wheelbase=2.5, dt=0.1),
-    Q=np.diag([3.0, 3.0, 0.8, 0.4]),     # x, y, heading, speed
-    R=np.diag([0.1, 0.1]),               # accel, steering
+    BicycleModel(wheelbase=2.5, dt=0.1),   # state [x, y, θ, v], control [a, δ]
+    Q=np.diag([3.0, 3.0, 0.8, 0.4]),
+    R=np.diag([0.1, 0.1]),
     horizon=25,
     Qf=np.diag([30.0, 30.0, 3.0, 3.0]),
-    a_bounds=(-3.0, 3.0),
-    delta_bounds=(-0.6, 0.6),
-    v_bounds=(-3.0, 8.0),
-    barrier_weight=500.0,
+    a_bounds=(-3.0, 3.0), delta_bounds=(-0.6, 0.6), v_bounds=(-3.0, 8.0),
+    constraint_mode="al",                  # "barrier" | "al" | "slack"
 )
-
-x0 = np.array([0.0, 0.0, 0.0, 0.0])      # [x, y, theta, v]
 goal = np.array([10.0, 4.0, 0.0, 0.0])
-u = mpc.control(x0, goal)                # first [a, delta] to apply
-traj = mpc.simulate(x0, goal, steps=120) # closed-loop rollout
+u = mpc.control(np.zeros(4), goal)
+traj = mpc.simulate(np.zeros(4), goal, steps=120)
 ```
 
-> The soft barrier means inputs may slightly exceed the limits; raise
-> `barrier_weight` to tighten. The dynamics are nonlinear, so the predicted
-> trajectory satisfies them to a small numerical residual (the *applied*
-> closed-loop control uses the true model).
+The dynamics (RK4, with analytic Jacobians) and costs are `gtsam.CustomFactor`s, optimized with Levenberg-Marquardt and warm-started between steps. `xref` may be a single state (set-point) or a `(horizon+1, 4)` reference trajectory (path tracking). Obstacles to avoid are passed as `obstacles=` (static centres `(2,)` or per-step predictions `(horizon+1, 2)`).
+
+**Inequality constraints** (input / speed / obstacle keep-out) are handled by a pluggable [`ConstraintStrategy`](gtsam_mpc/constraints.py):
+
+- `BarrierStrategy` — fixed one-sided quadratic penalty (soft, fast).
+- `AugmentedLagrangianStrategy` — outer multiplier loop; meets bounds tightly without tuning a weight.
+- `SlackStrategy` — `g + s² = 0` hard equality with a slack variable; a single solve.
+
+Pass `constraint_mode="barrier"|"al"|"slack"` or a `constraints=` strategy instance.
+
+> The barrier/slack avoidance is **soft** — it strongly avoids but does not *guarantee* a hard minimum distance. Augmented Lagrangian meets the bounds tightly. See the hard-constraints discussion in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Demos
+
+All demos run headless for CI/testing with `SDL_VIDEODRIVER=dummy GTSAM_MPC_MAX_FRAMES=<n>`.
+
+**Minimal samples** (print a metric vs. a naive baseline; save a plot if matplotlib is installed) — one per autonomy layer, echoing three reference projects:
+
+| Script | Layer | Echoes |
+| ------ | ----- | ------ |
+| `examples/localization.py` | estimation: Pose2 odometry + GPS fusion | JPCM / IPN_MPC |
+| `examples/control.py` | control: receding-horizon MPC | this package |
+| `examples/tracking.py` | perception: multi-object CV smoother | FGO-MOT |
+| `examples/double_integrator.py` | control: 1-D LQR vs. Riccati | — |
+
+**Interactive pygame demos** (left-click / keys to drive; **space** pause, **r** reset, **esc** quit):
+
+| Script | What it shows |
+| ------ | ------------- |
+| `examples/pygame_sim.py` | point-mass MPC chasing a clickable goal |
+| `examples/bicycle_sim.py` | bicycle MPC driving to a clickable goal |
+| `examples/path_following_sim.py` | bicycle MPC tracking selectable paths (1–5) at the curvature-limited speed |
+| `examples/loc_control_sim.py` | **localization + control**: drive on the MHE estimate vs. raw GPS (two-graph pipeline) |
+| `examples/joint_loc_control_sim.py` | the same, as a **single graph** (one `optimize()`) |
+| `examples/integrated_sim.py` | **track + avoid**: CV tracker predicts moving obstacles, `BicycleMPC` avoids them |
+| `examples/loc_track_control_sim.py` | **full stack**: localization + tracking + control in one graph, uncertainty-aware avoidance |
+
+### Full stack: `JointLocTrackControl`
+
+`examples/loc_track_control_sim.py` drives `JointLocTrackControl` — ego localization (GPS + speed), constant-velocity tracking of several moving obstacles, and path-following control with obstacle avoidance, **all in one `NonlinearFactorGraph` solved once per step**. Two touches make the coupling pay off:
+
+- the keep-out radius for each obstacle is **inflated by that obstacle's track covariance** (read from `gtsam.Marginals`) — the car gives a wider berth to uncertain tracks;
+- detections are **range-dependent** — a closer obstacle is observed more strongly, so its track tightens and the car can pass it more confidently.
+
+```python
+import numpy as np
+from gtsam_mpc import JointLocTrackControl
+
+jtc = JointLocTrackControl(n_obstacles=3, safety_radius=3.0, n_sigma=1.5)
+jtc.reset(x0, [obs0, obs1, obs2])        # obstacle [px,py,vx,vy] or (px,py)
+est, plan_states, plan_u, obs_est, obs_pred = jtc.step(u, gps, v_meas, dets, reference)
+```
+
+### Recording a GIF
+
+No display needed — record any demo exposing `iter_frames` to an animated GIF:
+
+```bash
+python examples/make_gif.py out.gif --demo loc_track_control_sim --frames 300 --scale 0.6
+python examples/make_gif.py out.gif --demo integrated_sim --frames 90
+```
 
 ## Tests
 
 ```bash
-pytest
+pytest          # 44 tests, ~4–5 min (the joint/marginals demos dominate)
 ```
 
-The suite validates the factor-graph solution against an independent finite-horizon LQR (Riccati) reference, checks dynamics/initial-condition consistency, and verifies closed-loop regulation to the origin.
+Coverage spans the whole package: `LinearMPC` against an independent finite-horizon LQR (Riccati) reference; `BicycleModel` Jacobians against finite differences; the three constraint strategies; `MovingHorizonEstimator` / `ConstantVelocityTracker`; the path geometry; and each demo's `run()` entry point, asserting the factor-graph result beats its naive baseline (fused vs. raw, smoothed vs. detections, localizes + tracks + avoids).
 
-## API
+## API reference
 
-- **`LinearSystem(A, B)`** — discrete-time LTI system; `double_integrator(dt)` and `point_mass_2d(dt)` are ready-made examples.
-- **`LinearMPC(system, Q, R, horizon, Qf=None)`** — the solver.
-  - `.solve(x0, xref=None) -> MPCResult` — open-loop optimal `states` / `controls`.
-  - `.control(x0, xref=None) -> np.ndarray` — first optimal control (one receding-horizon step).
-  - `.simulate(x0, steps, xref=None) -> MPCResult` — closed-loop receding-horizon rollout.
-- **`MPCResult`** — `.states`, `.controls`, `.u0`.
-- **`BicycleModel(wheelbase, dt)`** — nonlinear kinematic bicycle; `.step`, `.jacobians`.
-- **`BicycleMPC(model, Q, R, horizon, Qf=None, a_bounds, delta_bounds, v_bounds, constraints=None, constraint_mode="barrier", barrier_weight, safety_radius, obstacle_weight, ...)`**
-  - `.solve(x0, xref, obstacles=None, warm_start=True) -> MPCResult` (`xref` is a single state or a `(horizon+1, 4)` reference trajectory)
-  - `.control(x0, xref, obstacles=None) -> np.ndarray`, `.simulate(x0, xref, steps, obstacles=None) -> MPCResult`, `.reset()`
-  - Pass either `constraint_mode` (`"barrier"`/`"al"`/`"slack"`) or a `constraints=` strategy object.
-
-**Constraints** (`gtsam_mpc.constraints`): `BarrierStrategy`, `AugmentedLagrangianStrategy`, `SlackStrategy`, `Inequality`, `make_strategy`.
-
-**Estimation** (`gtsam_mpc.estimation`):
-- **`MovingHorizonEstimator(model, window, gps_sigma, ...)`** — `.reset(x0)`, `.update(u, gps, v) -> state`.
-- **`ConstantVelocityTracker(dt, process_sigma, meas_sigma)`** — `.smooth(detections)`, `.estimate(detections)`, `.predict(state, horizon, dt=None)`.
-
-**Joint** (`gtsam_mpc.joint`):
-- **`JointEstimatorMPC(...)`** — estimation window + control horizon in one graph; `.reset(x0)`, `.step(u, gps, v, reference) -> (estimate, states, controls)`.
-- **`JointLocTrackControl(n_obstacles, safety_radius, n_sigma, ...)`** — localization + obstacle tracking + control in a *single* graph, with the keep-out radius inflated by each obstacle track's covariance (uncertainty-aware avoidance); `.reset(x0, obstacles)`, `.step(u, gps, v, detections, reference) -> (estimate, states, controls, obstacle_estimates, obstacle_predictions)`. Demo: `examples/loc_track_control_sim.py`.
-
-**Factors / paths** (`gtsam_mpc.factors`, `gtsam_mpc.paths`): the reusable `CustomFactor` vocabulary and path geometry (`make_path`, `path_curvature`, `reference_trajectory`, `cross_track_error`, …). See [ARCHITECTURE.md](ARCHITECTURE.md).
+- **Models** (`gtsam_mpc.models`): `LinearSystem(A, B)`, `double_integrator(dt)`, `point_mass_2d(dt)`, `BicycleModel(wheelbase, dt, substeps)` (`.step`, `.jacobians`).
+- **Control** (`gtsam_mpc.control`):
+  - `LinearMPC(system, Q, R, horizon, Qf=None)` — `.solve(x0, xref=None)`, `.control`, `.simulate`.
+  - `BicycleMPC(model, Q, R, horizon, Qf=None, a_bounds, delta_bounds, v_bounds, constraints=None, constraint_mode="barrier", barrier_weight, safety_radius, obstacle_weight, ...)` — `.solve(x0, xref, obstacles=None, warm_start=True)`, `.control`, `.simulate`, `.reset`.
+  - `MPCResult` — `.states`, `.controls`, `.u0`.
+- **Constraints** (`gtsam_mpc.constraints`): `BarrierStrategy`, `AugmentedLagrangianStrategy`, `SlackStrategy`, `Inequality`, `make_strategy`.
+- **Estimation** (`gtsam_mpc.estimation`):
+  - `MovingHorizonEstimator(model, window, gps_sigma, ...)` — `.reset(x0)`, `.update(u, gps, v) -> state`.
+  - `ConstantVelocityTracker(dt, process_sigma, meas_sigma)` — `.smooth(detections)`, `.estimate(detections)`, `.predict(state, horizon, dt=None)`.
+- **Joint** (`gtsam_mpc.joint`):
+  - `JointEstimatorMPC(...)` — `.reset(x0)`, `.step(u, gps, v, reference) -> (estimate, states, controls)`.
+  - `JointLocTrackControl(n_obstacles, safety_radius, n_sigma, ...)` — `.reset(x0, obstacles)`, `.step(u, gps, v, detections, reference) -> (estimate, states, controls, obstacle_estimates, obstacle_predictions)`.
+- **Factors / paths** (`gtsam_mpc.factors`, `gtsam_mpc.paths`): the reusable `CustomFactor` vocabulary and path geometry (`make_path`, `path_curvature`, `reference_trajectory`, `cross_track_error`, …).
 
 ## References
 
 - F. Dellaert and M. Kaess, *Factor Graphs for Robot Perception*, Foundations and Trends in Robotics, 2017.
-- GTSAM: https://gtsam.org/
+- Reference projects this package echoes: JPCM / IPN_MPC (joint positioning + control), FGO-MOT (factor-graph multi-object tracking).
+- GTSAM: <https://gtsam.org/>
 
 ## License
 

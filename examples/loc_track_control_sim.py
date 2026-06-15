@@ -5,11 +5,14 @@ in a single ``optimize()`` per step, on a racetrack with slow *moving* traffic:
 
     * the ego car localizes from noisy **GPS** + wheel-speed (estimation window),
     * each **obstacle** is a slower car driving along the track; it is tracked
-      from noisy detections (as a constant-velocity target) and predicted over
-      the horizon, and
+      from noisy detections (range-dependent: closer = observed more strongly)
+      and predicted over the horizon, and
     * the (faster) ego follows the path while **overtaking / avoiding** every
       obstacle, with each keep-out radius inflated by that obstacle track's
       covariance (uncertainty-aware).
+
+The whole scenario is encapsulated in :class:`Sim`, which ``main`` (interactive),
+``run`` (headless metrics) and ``iter_frames`` (GIF recording) all drive.
 
 Controls:
     * Space  -- pause / resume
@@ -121,40 +124,129 @@ def _scenario(course=COURSE, n_obstacles=N_OBSTACLES, offset=OBS_OFFSET,
     return path, curv, true, obstacles
 
 
+class Sim:
+    """One closed-loop full-stack scenario: ego + traffic + the joint solver.
+
+    Owns the RNG and all visual state, so ``step`` advances one control step and
+    ``draw`` renders the current frame. ``main``/``run``/``iter_frames`` differ
+    only in how they drive it.
+    """
+
+    def __init__(self, seed: int = 0, gps_sigma: float = GPS_SIGMA,
+                 n_obstacles: int = N_OBSTACLES, safety_radius: float = SAFETY_RADIUS,
+                 n_sigma: float = N_SIGMA):
+        self.rng = np.random.default_rng(seed)
+        self.gps_sigma = gps_sigma
+        self.jtc = JointLocTrackControl(n_obstacles=n_obstacles, gps_sigma=gps_sigma,
+                                        safety_radius=safety_radius, n_sigma=n_sigma)
+        self.plant = BicycleModel(wheelbase=WHEELBASE, dt=pf.DT)
+        self.path, self.curv, self.true, self.obs = _scenario(n_obstacles=n_obstacles)
+        self.jtc.reset(self.true, [o.cv_state() for o in self.obs])
+        self.estimate = self.true.copy()
+        self.u = np.zeros(2)
+        self.states = np.tile(self.true, (self.jtc.N + 1, 1))
+        self.preds = [np.tile(o.position(), (self.jtc.N + 1, 1)) for o in self.obs]
+        self.det_hist = [[] for _ in self.obs]
+        self.ego_gps: list = []
+        self.true_trail: list = []
+        self.est_trail: list = []
+
+    def step(self) -> None:
+        for o in self.obs:
+            o.advance(pf.DT)
+        self.true = self.plant.step(self.true, self.u)
+        gps = self.true[:2] + self.rng.normal(0.0, self.gps_sigma, 2)
+        v_meas = self.true[3] + self.rng.normal(0.0, SPEED_SIGMA)
+        dets = [o.position()
+                + self.rng.normal(0.0, _det_sigma(np.linalg.norm(self.true[:2] - o.position())), 2)
+                for o in self.obs]
+        near = paths.nearest_index(self.path, self.estimate[:2])
+        refs = paths.reference_trajectory(self.path, self.curv, near, TARGET_SPEED,
+                                          self.jtc.N, pf.MPC_DT)
+        self.estimate, self.states, ctrls, _oe, opred = self.jtc.step(
+            self.u, gps, v_meas, dets, refs)
+        self.u = ctrls[0]
+        for j in range(len(self.obs)):
+            self.preds[j] = opred[j]
+            self.det_hist[j].append(dets[j])
+            if len(self.det_hist[j]) > 60:
+                self.det_hist[j].pop(0)
+        self.ego_gps.append(gps.copy())
+        self.true_trail.append(self.true[:2].copy())
+        self.est_trail.append(self.estimate[:2].copy())
+        for buf in (self.ego_gps, self.true_trail, self.est_trail):
+            if len(buf) > 90:
+                buf.pop(0)
+
+    def clearance(self) -> float:
+        return min(float(np.linalg.norm(self.true[:2] - o.position())) for o in self.obs)
+
+    def draw(self, screen, font, paused: bool = False) -> None:
+        screen.fill(pf.BG)
+        pf.draw_path(screen, self.path)
+        for j, o in enumerate(self.obs):
+            for d in self.det_hist[j]:
+                pygame.draw.circle(screen, OBS_COLOR, pf.world_to_screen(d), 1)
+            pygame.draw.lines(screen, PRED_COLOR, False,
+                              [pf.world_to_screen(p) for p in self.preds[j]], 1)
+            oc = pf.world_to_screen(o.position())
+            radius = SAFETY_RADIUS + N_SIGMA * self.jtc.std.get((j, 0), 0.0)
+            pygame.draw.circle(screen, OBS_COLOR, oc, int(0.8 * pf.PIXELS_PER_METER))
+            pygame.draw.circle(screen, OBS_COLOR, oc, int(radius * pf.PIXELS_PER_METER), 1)
+
+        # Ego localization noise: raw GPS fixes, true vs estimated trail, 2-sigma ellipse.
+        for g in self.ego_gps:
+            pygame.draw.circle(screen, EGO_GPS_COLOR, pf.world_to_screen(g), 2)
+        if len(self.true_trail) > 1:
+            pygame.draw.lines(screen, TRUE_TRAIL_COLOR, False,
+                              [pf.world_to_screen(p) for p in self.true_trail], 2)
+        if len(self.est_trail) > 1:
+            pygame.draw.lines(screen, EST_TRAIL_COLOR, False,
+                              [pf.world_to_screen(p) for p in self.est_trail], 2)
+        if self.jtc.ego_pos_cov is not None:
+            ell = _cov_ellipse_points(self.estimate[:2], self.jtc.ego_pos_cov, 2.0)
+            pygame.draw.polygon(screen, UNCERT_COLOR,
+                                [pf.world_to_screen(p) for p in ell], 1)
+
+        pygame.draw.lines(screen, pf.PLAN_COLOR, False,
+                          [pf.world_to_screen(s[:2]) for s in self.states], 2)
+        pf.draw_car(screen, self.true, float(self.u[1]))
+        ex, ey = pf.world_to_screen(self.estimate[:2])
+        pygame.draw.circle(screen, EST_COLOR, (ex, ey), 6, 2)
+
+        loc_err = float(np.linalg.norm(self.true[:2] - self.estimate[:2]))
+        sd = (np.sqrt(np.trace(self.jtc.ego_pos_cov) / 2.0)
+              if self.jtc.ego_pos_cov is not None else 0.0)
+        lines = [
+            f"loc err={loc_err:.2f} m   est 1-sigma={sd:.2f} m   "
+            f"obstacles={len(self.obs)} @ {OBS_SPEED:.0f} m/s   "
+            f"nearest clearance={self.clearance():.2f} m",
+            "amber=raw GPS fixes   green=true path   blue=estimate path   "
+            "blue ellipse=2-sigma localization uncertainty",
+            "ONE GRAPH (single optimize): localize + track + avoid   "
+            "red ring=safety (shrinks when obstacle is close = confident)",
+            "space pause   r reset   esc quit" + ("   [PAUSED]" if paused else ""),
+        ]
+        for i, text in enumerate(lines):
+            screen.blit(font.render(text, True, pf.TEXT_COLOR), (10, 10 + i * 20))
+
+
 def run(seed: int = 0, steps: int = 240, gps_sigma: float = GPS_SIGMA,
         n_obstacles: int = N_OBSTACLES, safety_radius: float = SAFETY_RADIUS,
         n_sigma: float = N_SIGMA) -> dict:
     """Headless full-stack run; returns localization / clearance / progress."""
-    rng = np.random.default_rng(seed)
-    jtc = JointLocTrackControl(n_obstacles=n_obstacles, gps_sigma=gps_sigma,
-                               safety_radius=safety_radius, n_sigma=n_sigma)
-    plant = BicycleModel(wheelbase=WHEELBASE, dt=pf.DT)
-    path, curv, true, obs = _scenario(n_obstacles=n_obstacles)
-    jtc.reset(true, [o.cv_state() for o in obs])
-    estimate = true.copy()
-    u = np.zeros(2)
-
+    sim = Sim(seed=seed, gps_sigma=gps_sigma, n_obstacles=n_obstacles,
+              safety_radius=safety_radius, n_sigma=n_sigma)
     loc, min_clear = [], np.inf
-    prev_idx = paths.nearest_index(path, true[:2])
+    prev_idx = paths.nearest_index(sim.path, sim.true[:2])
     progress = 0
     for _ in range(steps):
-        for o in obs:
-            o.advance(pf.DT)
-        true = plant.step(true, u)
-        gps = true[:2] + rng.normal(0.0, gps_sigma, 2)
-        v_meas = true[3] + rng.normal(0.0, SPEED_SIGMA)
-        dets = [o.position() + rng.normal(0.0, _det_sigma(np.linalg.norm(true[:2] - o.position())), 2)
-                for o in obs]
-        near = paths.nearest_index(path, estimate[:2])
-        refs = paths.reference_trajectory(path, curv, near, TARGET_SPEED, jtc.N, pf.MPC_DT)
-        estimate, _s, ctrls, _oe, _op = jtc.step(u, gps, v_meas, dets, refs)
-        u = ctrls[0]
-        loc.append(np.linalg.norm(true[:2] - estimate[:2]))
-        min_clear = min(min_clear,
-                        min(np.linalg.norm(true[:2] - o.position()) for o in obs))
-        cur = paths.nearest_index(path, true[:2])
-        d = (cur - prev_idx) % len(path)
-        progress += d if d < len(path) // 2 else 0
+        sim.step()
+        loc.append(float(np.linalg.norm(sim.true[:2] - sim.estimate[:2])))
+        min_clear = min(min_clear, sim.clearance())
+        cur = paths.nearest_index(sim.path, sim.true[:2])
+        d = (cur - prev_idx) % len(sim.path)
+        progress += d if d < len(sim.path) // 2 else 0
         prev_idx = cur
 
     loc = np.array(loc[30:])
@@ -162,13 +254,26 @@ def run(seed: int = 0, steps: int = 240, gps_sigma: float = GPS_SIGMA,
         "loc_rmse": float(np.sqrt(np.mean(loc ** 2))),
         "min_clearance": float(min_clear),
         "progress": int(progress),
-        "path_len": len(path),
+        "path_len": len(sim.path),
     }
+
+
+def iter_frames(frames: int, seed: int = 0):
+    """Yield a rendered surface per frame (headless), for GIF recording."""
+    pygame.init()
+    pygame.font.init()
+    surface = pygame.Surface((pf.WIDTH, pf.HEIGHT))
+    font = pygame.font.SysFont("monospace", 15)
+    sim = Sim(seed=seed)
+    for _ in range(frames):
+        sim.step()
+        sim.draw(surface, font)
+        yield surface
+    pygame.quit()
 
 
 def main() -> None:
     max_frames = max_frames_from_env()
-    rng = np.random.default_rng(0)
 
     pygame.init()
     screen = pygame.display.set_mode((pf.WIDTH, pf.HEIGHT))
@@ -176,24 +281,7 @@ def main() -> None:
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("monospace", 16)
 
-    plant = BicycleModel(wheelbase=WHEELBASE, dt=pf.DT)
-
-    def setup():
-        path, curv, true, obs = _scenario()
-        jtc = JointLocTrackControl(n_obstacles=len(obs), gps_sigma=GPS_SIGMA,
-                                   safety_radius=SAFETY_RADIUS, n_sigma=N_SIGMA)
-        jtc.reset(true, [o.cv_state() for o in obs])
-        det_hist = [[] for _ in obs]
-        preds = [np.tile(o.position(), (jtc.N + 1, 1)) for o in obs]
-        return jtc, path, curv, true, obs, det_hist, preds
-
-    jtc, path, curv, true, obs, det_hist, preds = setup()
-    estimate = true.copy()
-    u = np.zeros(2)
-    states = np.tile(true, (jtc.N + 1, 1))
-    ego_gps: list = []
-    true_trail: list = []
-    est_trail: list = []
+    sim = Sim()
     paused = False
 
     frame = 0
@@ -208,85 +296,14 @@ def main() -> None:
                 elif event.key == pygame.K_SPACE:
                     paused = not paused
                 elif event.key == pygame.K_r:
-                    jtc, path, curv, true, obs, det_hist, preds = setup()
-                    estimate = true.copy(); u = np.zeros(2)
-                    ego_gps = []; true_trail = []; est_trail = []
+                    sim = Sim()
 
         if not paused:
-            for o in obs:
-                o.advance(pf.DT)
-            true = plant.step(true, u)
-            gps = true[:2] + rng.normal(0.0, GPS_SIGMA, 2)
-            v_meas = true[3] + rng.normal(0.0, SPEED_SIGMA)
-            dets = [o.position() + rng.normal(0.0, _det_sigma(np.linalg.norm(true[:2] - o.position())), 2)
-                    for o in obs]
-            near = paths.nearest_index(path, estimate[:2])
-            refs = paths.reference_trajectory(path, curv, near, TARGET_SPEED, jtc.N, pf.MPC_DT)
-            estimate, states, ctrls, oest, opred = jtc.step(u, gps, v_meas, dets, refs)
-            u = ctrls[0]
-            for j in range(len(obs)):
-                preds[j] = opred[j]
-                det_hist[j].append(dets[j])
-                if len(det_hist[j]) > 60:
-                    det_hist[j].pop(0)
-            ego_gps.append(gps.copy())
-            true_trail.append(true[:2].copy())
-            est_trail.append(estimate[:2].copy())
-            for buf in (ego_gps, true_trail, est_trail):
-                if len(buf) > 90:
-                    buf.pop(0)
-
-        # --- render ---
-        screen.fill(pf.BG)
-        pf.draw_path(screen, path)
-        for j, o in enumerate(obs):
-            for d in det_hist[j]:
-                pygame.draw.circle(screen, GPS_COLOR, pf.world_to_screen(d), 2)
-            pygame.draw.lines(screen, PRED_COLOR, False,
-                              [pf.world_to_screen(p) for p in preds[j]], 1)
-            oc = pf.world_to_screen(o.position())
-            radius = SAFETY_RADIUS + N_SIGMA * jtc.std.get((j, 0), 0.0)
-            pygame.draw.circle(screen, OBS_COLOR, oc, int(0.8 * pf.PIXELS_PER_METER))
-            pygame.draw.circle(screen, OBS_COLOR, oc, int(radius * pf.PIXELS_PER_METER), 1)
-        # Ego localization noise: raw GPS fixes, true vs estimated trail, and the
-        # 2-sigma position-uncertainty ellipse around the estimate.
-        for g in ego_gps:
-            pygame.draw.circle(screen, EGO_GPS_COLOR, pf.world_to_screen(g), 2)
-        if len(true_trail) > 1:
-            pygame.draw.lines(screen, TRUE_TRAIL_COLOR, False,
-                              [pf.world_to_screen(p) for p in true_trail], 2)
-        if len(est_trail) > 1:
-            pygame.draw.lines(screen, EST_TRAIL_COLOR, False,
-                              [pf.world_to_screen(p) for p in est_trail], 2)
-        if jtc.ego_pos_cov is not None:
-            ell = _cov_ellipse_points(estimate[:2], jtc.ego_pos_cov, n_sigma=2.0)
-            pygame.draw.polygon(screen, UNCERT_COLOR,
-                                [pf.world_to_screen(p) for p in ell], 1)
-
-        pygame.draw.lines(screen, pf.PLAN_COLOR, False,
-                          [pf.world_to_screen(s[:2]) for s in states], 2)
-        pf.draw_car(screen, true, float(u[1]))
-        ex, ey = pf.world_to_screen(estimate[:2])
-        pygame.draw.circle(screen, EST_COLOR, (ex, ey), 6, 2)
-
-        loc_err = float(np.linalg.norm(true[:2] - estimate[:2]))
-        clr = min(float(np.linalg.norm(true[:2] - o.position())) for o in obs)
-        gps_sd = (np.sqrt(np.trace(jtc.ego_pos_cov) / 2.0)
-                  if jtc.ego_pos_cov is not None else 0.0)
-        lines = [
-            f"loc err={loc_err:.2f} m   est 1-sigma={gps_sd:.2f} m   "
-            f"obstacles={len(obs)} @ {OBS_SPEED:.0f} m/s   nearest clearance={clr:.2f} m",
-            "amber=raw GPS fixes   green=true path   blue=estimate path   "
-            "blue ellipse=2-sigma localization uncertainty",
-            "ONE GRAPH (single optimize): localize + track + avoid   "
-            "green line=MPC plan (from estimate)   red=obstacle",
-            "space pause   r reset   esc quit" + ("   [PAUSED]" if paused else ""),
-        ]
-        for i, text in enumerate(lines):
-            screen.blit(font.render(text, True, pf.TEXT_COLOR), (10, 10 + i * 20))
-
+            sim.step()
+        sim.draw(screen, font, paused)
         pygame.display.flip()
         clock.tick(pf.FPS)
+
         frame += 1
         if max_frames is not None and frame >= max_frames:
             running = False
