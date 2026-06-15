@@ -25,6 +25,7 @@ htmlcov/
 *.png
 *.gif
 *.mp4
+!media/*.gif
 
 # Editors / OS
 .idea/
