@@ -19,19 +19,6 @@ def test_localization_fusion_beats_dead_reckoning():
     assert out["rmse_fused"] < 1.0
 
 
-def test_control_reaches_goal():
-    mod = importlib.import_module("examples.control")
-    out = mod.run()
-    assert out["final_error"] < 0.1
-
-
-def test_tracking_smoothing_beats_raw():
-    mod = importlib.import_module("examples.tracking")
-    out = mod.run(seed=0)
-    assert out["rmse_smoothed"] < out["rmse_raw"]
-    assert out["rmse_smoothed"] < 0.5
-
-
 def test_localization_control_coupling_mhe_beats_raw():
     mod = importlib.import_module("examples.loc_control_sim")
     mhe = mod.run(seed=0, steps=250, gps_sigma=1.0, use_estimate=True)
@@ -54,15 +41,6 @@ def test_joint_single_graph_matches_pipeline():
     # ...and localizes about as well as the two-graph pipeline (the past/future
     # coupling is weak for a deterministic model, so they should be close).
     assert joint["loc_rmse"] < 1.5 * pipe["loc_rmse"]
-
-
-def test_integrated_tracks_and_avoids():
-    mod = importlib.import_module("examples.integrated_sim")
-    out = mod.run(frames=70, seed=0)
-    # Stayed clear of the moving obstacles (soft keep-out, small slack allowed)...
-    assert out["min_clearance"] > mod.SAFETY_RADIUS - 0.5
-    # ...and still reached the goal.
-    assert out["goal_dist"] < 2.0
 
 
 def test_loc_track_control_single_graph():

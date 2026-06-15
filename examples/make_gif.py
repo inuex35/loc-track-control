@@ -3,13 +3,12 @@
 Useful for sharing the result where an interactive pygame window isn't
 available (CI, web, docs). Works with any demo that exposes an
 ``iter_frames(frames, seed)`` generator yielding a rendered pygame surface per
-frame (currently ``integrated_sim`` and ``loc_track_control_sim``).
+frame.
 
 Usage:
     python examples/make_gif.py [output.gif] [--demo NAME] [--frames N] [--scale S]
 
-Examples:
-    python examples/make_gif.py integrated.gif --frames 90 --scale 0.6
+Example:
     python examples/make_gif.py loctrack.gif --demo loc_track_control_sim --frames 300
 """
 
@@ -26,7 +25,7 @@ import numpy as np
 import pygame
 from PIL import Image
 
-DEMOS = ["integrated_sim", "loc_track_control_sim"]
+DEMOS = ["loc_track_control_sim"]
 
 
 def render_frames(demo: str, frames: int, seed: int) -> list[Image.Image]:
@@ -43,7 +42,7 @@ def render_frames(demo: str, frames: int, seed: int) -> list[Image.Image]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("output", nargs="?", default="demo.gif")
-    parser.add_argument("--demo", choices=DEMOS, default="integrated_sim")
+    parser.add_argument("--demo", choices=DEMOS, default="loc_track_control_sim")
     parser.add_argument("--frames", type=int, default=90)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--scale", type=float, default=0.6)

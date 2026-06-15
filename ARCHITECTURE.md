@@ -9,15 +9,13 @@ reusable solvers; the `examples/` are thin demos and visualizations on top.
 
 ```
 gtsam_mpc/
-  models.py        Dynamics models
-                     LinearSystem, double_integrator, point_mass_2d
-                     BicycleModel  (RK4 step + exact analytic Jacobians)
+  models.py        BicycleModel  (RK4 step + exact analytic Jacobians)
 
   factors.py       The factor vocabulary: GTSAM CustomFactor builders, each
                    with an analytic Jacobian + noise-model shorthands
                      prior, dynamics (ternary), motion (binary, fixed u),
-                     state_cost (heading-wrapped), zero_cost,
-                     position_measurement, scalar_measurement
+                     linear_motion (CV prior), keepout, state_cost
+                     (heading-wrapped), zero_cost, position/scalar_measurement
 
   constraints.py   Inequality g(x) <= 0 handling as pluggable strategies
                      Inequality                      (key + g, dg/dx evaluator)
@@ -26,14 +24,10 @@ gtsam_mpc/
                      SlackStrategy                   (g + s^2 = 0, single solve)
                      barrier_factor, make_strategy
 
-  control.py       MPC solvers built from factors + a constraint strategy
-                     LinearMPC   (linear Gaussian graph == Riccati)
-                     BicycleMPC  (nonlinear graph; pluggable constraints)
-                     MPCResult, require_pd
+  control.py       BicycleMPC  (nonlinear graph from factors + a constraint
+                   strategy), MPCResult, require_pd
 
-  estimation.py    State estimators on factor graphs
-                     MovingHorizonEstimator    (sliding-window bicycle MHE)
-                     ConstantVelocityTracker   (linear CV smoother + predictor)
+  estimation.py    MovingHorizonEstimator   (sliding-window bicycle MHE)
 
   joint.py         JointEstimatorMPC      -- estimation window + control horizon
                    JointLocTrackControl   -- + obstacle tracking & uncertainty-
@@ -46,10 +40,9 @@ gtsam_mpc/
 
 examples/          Demos + visualization only (no reusable algorithms)
   _viz.py            shared pygame camera (View), palette, draw_car, draw_grid
-  _racecar_app.py    shared interactive harness (event loop + render) for the
-                     localization+control demos; RacecarApp base class
+  _racecar_app.py    shared interactive harness (event loop + render); RacecarApp
   *_sim.py           interactive pygame demos
-  localization/control/tracking/double_integrator.py   minimal samples
+  localization.py    minimal odometry + GPS fusion sample
   make_gif.py        headless GIF recorder
 ```
 
@@ -66,7 +59,9 @@ depends on `examples/`.
   `JointEstimatorMPC` all assemble their graphs from `factors.py` instead of
   re-deriving the same dynamics/measurement error functions. This mirrors the
   reference projects (JPCM/IPN_MPC, FGO-MOT) where perception and control share
-  a factor-graph backbone.
+  a factor-graph backbone. (Obstacle tracking in `JointLocTrackControl` reuses
+  the same constant-velocity motion + position-measurement factors directly in
+  the joint graph.)
 * **Constraints are a strategy, not a branch.** Inequalities are described once
   as `Inequality` records; `barrier` / `al` / `slack` are interchangeable
   `ConstraintStrategy` objects. `BicycleMPC` accepts either a strategy instance
@@ -77,7 +72,7 @@ depends on `examples/`.
 
 ## Tests
 
-`tests/` mirrors the package: `test_control_linear.py`, `test_bicycle.py`
-(BicycleMPC + constraint modes), `test_constraints.py` (strategy API),
-`test_estimation.py`, `test_paths.py`, and `test_examples.py` (the demo
-`run()` entry points, asserting each factor-graph result beats its baseline).
+`tests/` mirrors the package: `test_bicycle.py` (BicycleMPC + constraint modes),
+`test_constraints.py` (strategy API), `test_estimation.py` (MHE), `test_paths.py`,
+and `test_examples.py` (the demo `run()` entry points, asserting each
+factor-graph result beats its baseline).

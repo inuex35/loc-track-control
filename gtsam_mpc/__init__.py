@@ -4,12 +4,12 @@ The package is organized around one idea: estimation, control and tracking are
 all maximum-a-posteriori inference on factor graphs built from a shared
 vocabulary of factors.
 
-    models       -- dynamics models (linear systems, kinematic bicycle)
+    models       -- dynamics model (kinematic bicycle)
     factors      -- reusable GTSAM CustomFactor builders (the vocabulary)
     constraints  -- inequality strategies (barrier / augmented Lagrangian / slack)
-    control      -- LinearMPC, BicycleMPC
-    estimation   -- MovingHorizonEstimator, ConstantVelocityTracker
-    joint        -- JointEstimatorMPC (estimation window + control horizon, one graph)
+    control      -- BicycleMPC
+    estimation   -- MovingHorizonEstimator
+    joint        -- JointEstimatorMPC, JointLocTrackControl (one graph)
     paths        -- reference paths and path-tracking geometry
 """
 
@@ -22,19 +22,15 @@ from .constraints import (
     SlackStrategy,
     make_strategy,
 )
-from .control import BicycleMPC, LinearMPC, MPCResult
-from .estimation import ConstantVelocityTracker, MovingHorizonEstimator
+from .control import BicycleMPC, MPCResult
+from .estimation import MovingHorizonEstimator
 from .joint import JointEstimatorMPC, JointLocTrackControl
-from .models import BicycleModel, LinearSystem, double_integrator, point_mass_2d
+from .models import BicycleModel
 
 __all__ = [
     # models
-    "LinearSystem",
-    "double_integrator",
-    "point_mass_2d",
     "BicycleModel",
     # control
-    "LinearMPC",
     "BicycleMPC",
     "MPCResult",
     # constraints
@@ -46,7 +42,6 @@ __all__ = [
     "make_strategy",
     # estimation
     "MovingHorizonEstimator",
-    "ConstantVelocityTracker",
     # joint
     "JointEstimatorMPC",
     "JointLocTrackControl",
@@ -55,4 +50,4 @@ __all__ = [
     "paths",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

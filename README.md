@@ -32,10 +32,8 @@ Estimation, control and tracking are all MAP inference on factor graphs built fr
 
 | Component | Problem |
 | --------- | ------- |
-| `LinearMPC` | linear-quadratic MPC (= Riccati) |
 | `BicycleMPC` | nonlinear bicycle MPC; barrier / aug-Lagrangian / slack constraints |
 | `MovingHorizonEstimator` | sliding-window localization |
-| `ConstantVelocityTracker` | multi-object tracking / prediction |
 | `JointEstimatorMPC` | localization + control, one graph |
 
 ```python
@@ -57,18 +55,17 @@ Interactive (space pause, r reset, esc quit); all run headless with `SDL_VIDEODR
 | Script | Shows |
 | ------ | ----- |
 | `loc_track_control_sim.py` | **full stack** (the headline above) |
-| `integrated_sim.py` | track moving obstacles, then avoid them |
 | `loc_control_sim.py` / `joint_loc_control_sim.py` | localization + control (pipeline / single graph) |
 | `path_following_sim.py` | bicycle MPC tracking selectable paths (1–5) |
-| `pygame_sim.py` / `bicycle_sim.py` | point-mass / bicycle MPC to a clickable goal |
-| `localization.py` / `control.py` / `tracking.py` | minimal per-layer samples |
+| `bicycle_sim.py` | bicycle MPC to a clickable goal |
+| `localization.py` | minimal odometry + GPS fusion sample |
 
-Record any demo to a GIF: `python examples/make_gif.py out.gif --demo loc_track_control_sim --frames 300`.
+Record the demo to a GIF: `python examples/make_gif.py out.gif --frames 300`.
 
 ## Test
 
 ```bash
-pytest   # 44 tests
+pytest   # 28 tests
 ```
 
 ## License

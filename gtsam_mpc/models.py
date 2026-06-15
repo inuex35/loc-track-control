@@ -1,7 +1,6 @@
 """Dynamics models used by the estimators and controllers.
 
-Two linear systems (a 1-D and a 2-D double integrator) for the linear MPC, and
-a nonlinear kinematic bicycle model (RK4-integrated, with analytic Jacobians)
+A nonlinear kinematic bicycle model (RK4-integrated, with analytic Jacobians)
 for the nonlinear MPC and the localization demos.
 """
 
@@ -10,81 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-
-
-@dataclass
-class LinearSystem:
-    """A discrete-time linear time-invariant system ``x_{k+1} = A x_k + B u_k``.
-
-    Attributes:
-        A: State transition matrix, shape ``(n, n)``.
-        B: Control input matrix, shape ``(n, m)``.
-    """
-
-    A: np.ndarray
-    B: np.ndarray
-
-    def __post_init__(self) -> None:
-        self.A = np.atleast_2d(np.asarray(self.A, dtype=float))
-        self.B = np.atleast_2d(np.asarray(self.B, dtype=float))
-        if self.A.shape[0] != self.A.shape[1]:
-            raise ValueError(f"A must be square, got {self.A.shape}")
-        if self.B.shape[0] != self.A.shape[0]:
-            raise ValueError(
-                f"B must have {self.A.shape[0]} rows to match A, got {self.B.shape}"
-            )
-
-    @property
-    def n_states(self) -> int:
-        """Number of state variables ``n``."""
-        return self.A.shape[0]
-
-    @property
-    def n_controls(self) -> int:
-        """Number of control inputs ``m``."""
-        return self.B.shape[1]
-
-    def step(self, x: np.ndarray, u: np.ndarray) -> np.ndarray:
-        """Propagate one step: ``x_{k+1} = A x_k + B u_k``."""
-        x = np.asarray(x, dtype=float)
-        u = np.asarray(u, dtype=float)
-        return self.A @ x + self.B @ u
-
-
-def double_integrator(dt: float = 0.1) -> LinearSystem:
-    """A 1-D double integrator discretized at timestep ``dt``.
-
-    State is ``[position, velocity]`` and the control is acceleration.
-    """
-    A = np.array([[1.0, dt], [0.0, 1.0]])
-    B = np.array([[0.5 * dt * dt], [dt]])
-    return LinearSystem(A, B)
-
-
-def point_mass_2d(dt: float = 0.1) -> LinearSystem:
-    """A 2-D point mass (decoupled double integrators) at timestep ``dt``.
-
-    State is ``[px, py, vx, vy]`` and the control is acceleration ``[ax, ay]``.
-    A goal ``[px, py, 0, 0]`` (any position, zero velocity) is an equilibrium.
-    """
-    A = np.array(
-        [
-            [1.0, 0.0, dt, 0.0],
-            [0.0, 1.0, 0.0, dt],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ]
-    )
-    half_dt2 = 0.5 * dt * dt
-    B = np.array(
-        [
-            [half_dt2, 0.0],
-            [0.0, half_dt2],
-            [dt, 0.0],
-            [0.0, dt],
-        ]
-    )
-    return LinearSystem(A, B)
 
 
 @dataclass

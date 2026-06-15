@@ -1,12 +1,9 @@
-"""Model Predictive Control solvers, as factor-graph optimization.
+"""Nonlinear MPC for the kinematic bicycle, as factor-graph optimization.
 
-* :class:`LinearMPC` -- finite-horizon linear-quadratic MPC. The whole problem
-  is a *linear* Gaussian factor graph whose MAP estimate is the optimal
-  trajectory (eliminating it is the Riccati recursion).
-* :class:`BicycleMPC` -- nonlinear MPC for the kinematic bicycle. The graph is
-  assembled from the shared :mod:`gtsam_mpc.factors` vocabulary; input/speed/
-  obstacle inequalities are handled by a pluggable
-  :mod:`gtsam_mpc.constraints` strategy (barrier / AL / slack).
+:class:`BicycleMPC` assembles its graph from the shared
+:mod:`gtsam_mpc.factors` vocabulary; input/speed/obstacle inequalities are
+handled by a pluggable :mod:`gtsam_mpc.constraints` strategy
+(barrier / AL / slack).
 """
 
 from __future__ import annotations
@@ -19,7 +16,7 @@ from gtsam.symbol_shorthand import U, X
 
 from . import factors
 from .constraints import ConstraintStrategy, Inequality, make_strategy
-from .models import BicycleModel, LinearSystem
+from .models import BicycleModel
 
 
 @dataclass
@@ -52,90 +49,6 @@ def require_pd(name: str, M: np.ndarray, dim: int) -> np.ndarray:
     if np.any(np.linalg.eigvalsh(M) <= 0):
         raise ValueError(f"{name} must be positive definite")
     return M
-
-
-class LinearMPC:
-    """Finite-horizon linear MPC solved as a Gaussian factor graph.
-
-    Args:
-        system: The discrete-time linear system to control.
-        Q: Running state cost matrix, shape ``(n, n)``, positive definite.
-        R: Running control cost matrix, shape ``(m, m)``, positive definite.
-        horizon: Prediction horizon ``N`` (number of control steps).
-        Qf: Terminal state cost matrix, shape ``(n, n)``. Defaults to ``Q``.
-    """
-
-    def __init__(self, system: LinearSystem, Q: np.ndarray, R: np.ndarray,
-                 horizon: int, Qf: np.ndarray | None = None) -> None:
-        if horizon < 1:
-            raise ValueError(f"horizon must be >= 1, got {horizon}")
-        n, m = system.n_states, system.n_controls
-        self.system = system
-        self.horizon = int(horizon)
-        self.Q = require_pd("Q", Q, n)
-        self.R = require_pd("R", R, m)
-        self.Qf = self.Q if Qf is None else require_pd("Qf", Qf, n)
-
-    def _build_graph(self, x0: np.ndarray) -> gtsam.GaussianFactorGraph:
-        n, m = self.system.n_states, self.system.n_controls
-        A, B = self.system.A, self.system.B
-        N = self.horizon
-
-        cost_x = gtsam.noiseModel.Gaussian.Information(self.Q)
-        cost_u = gtsam.noiseModel.Gaussian.Information(self.R)
-        cost_xN = gtsam.noiseModel.Gaussian.Information(self.Qf)
-        constraint_x = gtsam.noiseModel.Constrained.All(n)
-
-        graph = gtsam.GaussianFactorGraph()
-        graph.add(X(0), np.eye(n), np.asarray(x0, dtype=float), constraint_x)
-        for k in range(N):
-            graph.add(X(k + 1), np.eye(n), X(k), -A, U(k), -B,
-                      np.zeros(n), constraint_x)
-            graph.add(X(k), np.eye(n), np.zeros(n), cost_x)
-            graph.add(U(k), np.eye(m), np.zeros(m), cost_u)
-        graph.add(X(N), np.eye(n), np.zeros(n), cost_xN)
-        return graph
-
-    def _reference(self, xref: np.ndarray | None) -> np.ndarray:
-        n = self.system.n_states
-        if xref is None:
-            return np.zeros(n)
-        return np.asarray(xref, dtype=float).reshape(n)
-
-    def solve(self, x0: np.ndarray, xref: np.ndarray | None = None) -> MPCResult:
-        """Solve the open-loop optimal-control problem from initial state ``x0``.
-
-        ``xref`` is a target state to regulate toward (default origin); the cost
-        is on the error ``x - xref``, exact when ``xref`` is an equilibrium.
-        """
-        n, m = self.system.n_states, self.system.n_controls
-        x0 = np.asarray(x0, dtype=float).reshape(n)
-        xref = self._reference(xref)
-
-        solution = self._build_graph(x0 - xref).optimize()
-
-        states = np.array([solution.at(X(k)) + xref for k in range(self.horizon + 1)])
-        controls = np.array([solution.at(U(k)) for k in range(self.horizon)])
-        return MPCResult(states=states, controls=controls.reshape(self.horizon, m))
-
-    def control(self, x0: np.ndarray, xref: np.ndarray | None = None) -> np.ndarray:
-        """Return the first optimal control for ``x0`` (one receding-horizon step)."""
-        return self.solve(x0, xref).u0
-
-    def simulate(self, x0: np.ndarray, steps: int,
-                 xref: np.ndarray | None = None) -> MPCResult:
-        """Receding-horizon closed loop for ``steps`` steps (re-solve, apply u0)."""
-        n, m = self.system.n_states, self.system.n_controls
-        x = np.asarray(x0, dtype=float).reshape(n)
-        states = [x.copy()]
-        controls = []
-        for _ in range(steps):
-            u = self.control(x, xref)
-            x = self.system.step(x, u)
-            controls.append(u)
-            states.append(x.copy())
-        return MPCResult(states=np.array(states),
-                         controls=np.array(controls).reshape(steps, m))
 
 
 class BicycleMPC:
