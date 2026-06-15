@@ -1,4 +1,4 @@
-# gtsam-mpc
+# loc-track-control
 
 **Localization + multi-object tracking + control on a single factor graph**, with [GTSAM](https://gtsam.org/).
 
