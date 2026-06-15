@@ -267,9 +267,12 @@ class JointLocTrackControl(JointEstimatorMPC):
         return factors.isotropic(2, sigma)
 
     def _add_keepout_factors(self, graph) -> None:
+        # Avoidance shapes only the *future* plan (X(k+1..k+N)); the current node
+        # X(k) is pinned by the measurements, so a keep-out there would bias the
+        # localization estimate rather than the plan.
         k, N = self.k, self.N
         for j in range(self.M):
-            for i in range(N + 1):
+            for i in range(1, N + 1):
                 radius = self.safety_radius + self.n_sigma * self.std.get((j, i), 0.0)
                 graph.add(factors.keepout(X(k + i), _obs_key(j, k + i),
                                           radius, self.obs_barrier))

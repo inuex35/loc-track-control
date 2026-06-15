@@ -37,7 +37,7 @@ import examples.path_following_sim as pf
 from examples._racecar_app import EST_COLOR, GPS_COLOR
 from examples._viz import max_frames_from_env
 
-COURSE = "2"            # figure-eight
+COURSE = "1"            # circle (gentle curves -- the car never has to reverse)
 N_OBSTACLES = 5
 OBS_OFFSET = 3.0        # lateral offset of obstacles from the path [m]
 OBS_SPACING = 55        # path-index spacing between obstacles
