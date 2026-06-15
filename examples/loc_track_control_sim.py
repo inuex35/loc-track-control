@@ -53,6 +53,7 @@ DET_SIGMA_RATE = 0.045
 DET_SIGMA_MAX = 1.2
 TARGET_SPEED = 8.0
 WHEELBASE = pf.WHEELBASE
+WARMUP = 25             # steps to settle the MHE window + obstacle tracks before display
 
 OBS_COLOR = (255, 90, 90)
 PRED_COLOR = (255, 150, 150)
@@ -181,6 +182,19 @@ class Sim:
     def clearance(self) -> float:
         return min(float(np.linalg.norm(self.true[:2] - o.position())) for o in self.obs)
 
+    def clear_trails(self) -> None:
+        self.ego_gps.clear()
+        self.true_trail.clear()
+        self.est_trail.clear()
+        for h in self.det_hist:
+            h.clear()
+
+    def warmup(self, n: int = WARMUP) -> None:
+        """Run ``n`` steps and drop their trails, so display starts settled."""
+        for _ in range(n):
+            self.step()
+        self.clear_trails()
+
     def draw(self, screen, font, paused: bool = False) -> None:
         screen.fill(pf.BG)
         pf.draw_path(screen, self.path)
@@ -265,6 +279,7 @@ def iter_frames(frames: int, seed: int = 0):
     surface = pygame.Surface((pf.WIDTH, pf.HEIGHT))
     font = pygame.font.SysFont("monospace", 15)
     sim = Sim(seed=seed)
+    sim.warmup()
     for _ in range(frames):
         sim.step()
         sim.draw(surface, font)
@@ -282,6 +297,7 @@ def main() -> None:
     font = pygame.font.SysFont("monospace", 16)
 
     sim = Sim()
+    sim.warmup()
     paused = False
 
     frame = 0
@@ -297,6 +313,7 @@ def main() -> None:
                     paused = not paused
                 elif event.key == pygame.K_r:
                     sim = Sim()
+                    sim.warmup()
 
         if not paused:
             sim.step()
