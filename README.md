@@ -6,6 +6,8 @@
 
 ![full stack demo](media/loc_track_control.gif)
 
+Full-resolution video: [media/loc_track_control.mp4](media/loc_track_control.mp4)
+
 *Amber = raw GPS · green = true path · blue = estimate (+2σ ellipse) · red = tracked obstacles · green line = MPC plan. The red safety ring shrinks as an obstacle is observed more strongly up close, and grows with track uncertainty.*
 
 ```python
@@ -47,7 +49,7 @@ u = mpc.control(x0, goal)            # or mpc.simulate / a (horizon+1,4) referen
 ## Install
 
 ```bash
-pip install -e ".[sim]"   # core (GTSAM >= 4.3) + pygame; [dev] for pytest, [plot] for matplotlib
+pip install -e ".[sim]"   # core (GTSAM >= 4.3) + pygame; [dev] for pytest, [plot] for matplotlib, [video] for MP4
 ```
 
 ## Demos
@@ -62,7 +64,7 @@ Interactive (space pause, r reset, esc quit); all run headless with `SDL_VIDEODR
 | `bicycle_sim.py` | bicycle MPC to a clickable goal |
 | `localization.py` | minimal odometry + GPS fusion sample |
 
-Record the demo to a GIF: `python examples/make_gif.py out.gif --frames 300`.
+Record the demo to a GIF or MP4 (by extension): `python examples/make_gif.py out.gif --frames 300` / `python examples/make_gif.py out.mp4 --frames 300` (MP4 needs `pip install -e ".[video]"`).
 
 ## Test
 

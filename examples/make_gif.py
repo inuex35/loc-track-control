@@ -1,4 +1,4 @@
-"""Render an example simulation to an animated GIF (headless).
+"""Render an example simulation to an animated GIF or an MP4 video (headless).
 
 Useful for sharing the result where an interactive pygame window isn't
 available (CI, web, docs). Works with any demo that exposes an
@@ -6,10 +6,14 @@ available (CI, web, docs). Works with any demo that exposes an
 frame.
 
 Usage:
-    python examples/make_gif.py [output.gif] [--demo NAME] [--frames N] [--scale S]
+    python examples/make_gif.py [output.gif|output.mp4] [--demo NAME] [--frames N] [--scale S]
+
+The format follows the output extension. MP4 (H.264) needs ``imageio`` and
+``imageio-ffmpeg`` (``pip install -e ".[video]"``).
 
 Example:
     python examples/make_gif.py loctrack.gif --demo loc_track_control_sim --frames 300
+    python examples/make_gif.py loctrack.mp4 --frames 300
 """
 
 import argparse
@@ -39,32 +43,53 @@ def render_frames(demo: str, frames: int, seed: int) -> list[Image.Image]:
     return images
 
 
+def write_mp4(path: str, images: list[Image.Image], fps: int) -> None:
+    """Encode frames to an H.264 MP4 playable in browsers and players."""
+    import imageio.v2 as imageio
+
+    with imageio.get_writer(path, fps=fps, codec="libx264", quality=8,
+                            pixelformat="yuv420p", macro_block_size=1) as writer:
+        for im in images:
+            writer.append_data(np.asarray(im.convert("RGB")))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("output", nargs="?", default="demo.gif")
     parser.add_argument("--demo", choices=DEMOS, default="loc_track_control_sim")
     parser.add_argument("--frames", type=int, default=90)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--scale", type=float, default=0.6)
+    parser.add_argument("--scale", type=float, default=None,
+                        help="resize factor (default 0.6 for GIF, 1.0 for MP4)")
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--colors", type=int, default=64)
     args = parser.parse_args()
 
-    images = render_frames(args.demo, args.frames, args.seed)
-    if args.scale != 1.0:
-        w, h = images[0].size
-        size = (int(w * args.scale), int(h * args.scale))
-        images = [im.resize(size, Image.BILINEAR) for im in images]
-    # Adaptive palette keeps the GIF small.
-    images = [im.convert("P", palette=Image.ADAPTIVE, colors=args.colors) for im in images]
-
     out = args.output
+    video = out.lower().endswith(".mp4")
+    scale = args.scale if args.scale is not None else (1.0 if video else 0.6)
+
+    images = render_frames(args.demo, args.frames, args.seed)
+    w, h = images[0].size
+    size = (int(w * scale), int(h * scale))
+    if video:
+        # H.264 with yuv420p needs even dimensions.
+        size = (size[0] - size[0] % 2, size[1] - size[1] % 2)
+    if size != (w, h):
+        images = [im.resize(size, Image.BILINEAR) for im in images]
+
     if os.path.dirname(out):
         os.makedirs(os.path.dirname(out), exist_ok=True)
-    images[0].save(
-        out, save_all=True, append_images=images[1:],
-        duration=int(1000 / args.fps), loop=0, optimize=True,
-    )
+    if video:
+        write_mp4(out, images, args.fps)
+    else:
+        # Adaptive palette keeps the GIF small.
+        images = [im.convert("P", palette=Image.ADAPTIVE, colors=args.colors)
+                  for im in images]
+        images[0].save(
+            out, save_all=True, append_images=images[1:],
+            duration=int(1000 / args.fps), loop=0, optimize=True,
+        )
     size_kb = os.path.getsize(out) / 1024
     print(f"wrote {out}  ({len(images)} frames, {size_kb:.0f} KB)")
 
