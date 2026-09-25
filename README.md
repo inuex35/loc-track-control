@@ -6,8 +6,6 @@
 
 ![full stack demo](media/loc_track_control.gif)
 
-Full-resolution video: [media/loc_track_control.mp4](media/loc_track_control.mp4)
-
 *Amber = raw GPS · green = true path · blue = estimate (+2σ ellipse) · red = tracked obstacles · green line = MPC plan. The red safety ring shrinks as an obstacle is observed more strongly up close, and grows with track uncertainty.*
 
 ```python
@@ -46,6 +44,8 @@ u = mpc.control(x0, goal)            # or mpc.simulate / a (horizon+1,4) referen
 
 `constraint_mode="sqp"` uses GTSAM 4.3's constrained QP solver (`gtsam.QpProblem` + `gtsam.LinearConstraint`): each SQP step turns the hard dynamics into linear equalities and input / speed / keep-out bounds into linear inequalities, so the bounds hold exactly instead of up to a penalty slack. Degenerate or infeasible QPs fall back to `gtsam.AugmentedLagrangianOptimizer`. It is slower than the penalty modes (~0.2 s per step at horizon 20).
 
+Video: [media/sqp_obstacle.mp4](media/sqp_obstacle.mp4) (`examples/sqp_obstacle_sim.py`) — the target speed is set above the limit and obstacles block the centreline; speed, steering and keep-out clearance sit exactly on their bounds.
+
 ## Install
 
 ```bash
@@ -60,16 +60,17 @@ Interactive (space pause, r reset, esc quit); all run headless with `SDL_VIDEODR
 | ------ | ----- |
 | `loc_track_control_sim.py` | **full stack** (the headline above) |
 | `loc_control_sim.py` / `joint_loc_control_sim.py` | localization + control (pipeline / single graph) |
+| `sqp_obstacle_sim.py` | hard-constrained (SQP) path following around obstacles |
 | `path_following_sim.py` | bicycle MPC tracking selectable paths (1–5) |
 | `bicycle_sim.py` | bicycle MPC to a clickable goal |
 | `localization.py` | minimal odometry + GPS fusion sample |
 
-Record the demo to a GIF or MP4 (by extension): `python examples/make_gif.py out.gif --frames 300` / `python examples/make_gif.py out.mp4 --frames 300` (MP4 needs `pip install -e ".[video]"`).
+Record the demo to a GIF or MP4 (by extension): `python examples/make_gif.py out.gif --frames 300` / `python examples/make_gif.py out.mp4 --demo sqp_obstacle_sim --frames 300` (MP4 needs `pip install -e ".[video]"`).
 
 ## Test
 
 ```bash
-pytest   # 30 tests
+pytest   # 31 tests
 ```
 
 ## License

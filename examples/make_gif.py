@@ -29,7 +29,7 @@ import numpy as np
 import pygame
 from PIL import Image
 
-DEMOS = ["loc_track_control_sim"]
+DEMOS = ["loc_track_control_sim", "sqp_obstacle_sim"]
 
 
 def render_frames(demo: str, frames: int, seed: int) -> list[Image.Image]:

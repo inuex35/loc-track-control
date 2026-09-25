@@ -55,3 +55,14 @@ def test_loc_track_control_single_graph():
     assert out["min_clearance"] > mod.SAFETY_RADIUS - 1.5
     # ...and makes real progress around the track (~ at least most of a lap).
     assert out["progress"] > out["path_len"] // 2
+
+
+def test_sqp_obstacle_hard_constraints():
+    mod = importlib.import_module("examples.sqp_obstacle_sim")
+    out = mod.run(steps=60)
+    # Hard constraints: the keep-out ring and the speed/steering limits hold
+    # (up to solver tolerance), even though the target speed exceeds the limit.
+    assert out["min_clearance"] > mod.SAFETY_RADIUS - 1e-3
+    assert out["max_v"] < mod.V_BOUNDS[1] + 1e-3
+    assert out["max_delta"] < mod.DELTA_BOUNDS[1] + 1e-3
+    assert out["progress"] > 100
