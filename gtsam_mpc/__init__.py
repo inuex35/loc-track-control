@@ -6,7 +6,7 @@ vocabulary of factors.
 
     models       -- dynamics model (kinematic bicycle)
     factors      -- reusable GTSAM CustomFactor builders (the vocabulary)
-    constraints  -- inequality strategies (barrier / augmented Lagrangian / slack)
+    constraints  -- inequality strategies (barrier / augmented Lagrangian / slack / SQP)
     control      -- BicycleMPC
     estimation   -- MovingHorizonEstimator
     joint        -- JointEstimatorMPC, JointLocTrackControl (one graph)
@@ -20,6 +20,7 @@ from .constraints import (
     ConstraintStrategy,
     Inequality,
     SlackStrategy,
+    SQPStrategy,
     make_strategy,
 )
 from .control import BicycleMPC, MPCResult
@@ -38,6 +39,7 @@ __all__ = [
     "BarrierStrategy",
     "AugmentedLagrangianStrategy",
     "SlackStrategy",
+    "SQPStrategy",
     "Inequality",
     "make_strategy",
     # estimation

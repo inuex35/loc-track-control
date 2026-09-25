@@ -9,6 +9,7 @@ from gtsam_mpc import (
     BicycleMPC,
     BicycleModel,
     SlackStrategy,
+    SQPStrategy,
     make_strategy,
 )
 
@@ -27,6 +28,7 @@ def test_make_strategy_types():
     assert isinstance(make_strategy("barrier"), BarrierStrategy)
     assert isinstance(make_strategy("al"), AugmentedLagrangianStrategy)
     assert isinstance(make_strategy("slack"), SlackStrategy)
+    assert isinstance(make_strategy("sqp"), SQPStrategy)
     with pytest.raises(ValueError):
         make_strategy("penalty")
 
@@ -46,3 +48,27 @@ def test_al_strategy_object_respects_bounds():
     a, delta = res.controls[:, 0], res.controls[:, 1]
     assert a.max() <= 2.0 + 1e-2 and a.min() >= -2.0 - 1e-2
     assert delta.max() <= 0.4 + 1e-2 and delta.min() >= -0.4 - 1e-2
+
+
+def test_sqp_enforces_bounds_as_hard_constraints():
+    # GTSAM's constrained QP solver: input and speed bounds hold exactly, not
+    # just up to a penalty-dependent slack.
+    mpc = _mpc(SQPStrategy())
+    mpc.v_bounds = (-2.0, 3.0)
+    res = mpc.simulate(np.zeros(4), np.array([15.0, 8.0, 0.0, 0.0]), steps=15)
+    a, delta = res.controls[:, 0], res.controls[:, 1]
+    assert a.max() <= 2.0 + 1e-6 and a.min() >= -2.0 - 1e-6
+    assert delta.max() <= 0.4 + 1e-6 and delta.min() >= -0.4 - 1e-6
+    assert res.states[:, 3].max() <= 3.0 + 1e-6
+    assert a.max() > 2.0 - 1e-6  # the bound is actually active
+
+
+def test_sqp_keeps_out_of_obstacle():
+    mpc = _mpc(SQPStrategy())
+    mpc.safety_radius = 2.0
+    obstacle = np.array([6.0, 0.8])
+    res = mpc.simulate(np.zeros(4), np.array([12.0, 0.0, 0.0, 0.0]), steps=60,
+                       obstacles=[obstacle])
+    min_dist = np.min(np.linalg.norm(res.states[:, :2] - obstacle, axis=1))
+    assert min_dist > 2.0 - 1e-2
+    assert res.states[-1, 0] > 9.0

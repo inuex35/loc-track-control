@@ -22,6 +22,9 @@ gtsam_mpc/
                      BarrierStrategy                 (soft one-sided penalty)
                      AugmentedLagrangianStrategy     (outer multiplier loop)
                      SlackStrategy                   (g + s^2 = 0, single solve)
+                     SQPStrategy                     (hard: SQP on GTSAM 4.3's
+                                                      QpProblem / LinearConstraint,
+                                                      AL-optimizer fallback)
                      barrier_factor, make_strategy
 
   control.py       BicycleMPC  (nonlinear graph from factors + a constraint
@@ -63,7 +66,7 @@ depends on `examples/`.
   the same constant-velocity motion + position-measurement factors directly in
   the joint graph.)
 * **Constraints are a strategy, not a branch.** Inequalities are described once
-  as `Inequality` records; `barrier` / `al` / `slack` are interchangeable
+  as `Inequality` records; `barrier` / `al` / `slack` / `sqp` are interchangeable
   `ConstraintStrategy` objects. `BicycleMPC` accepts either a strategy instance
   (`constraints=`) or a convenience mode name (`constraint_mode=`).
 * **Library vs. demo.** Anything reusable (estimators, trackers, path geometry)

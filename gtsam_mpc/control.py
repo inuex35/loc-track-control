@@ -3,7 +3,7 @@
 :class:`BicycleMPC` assembles its graph from the shared
 :mod:`gtsam_mpc.factors` vocabulary; input/speed/obstacle inequalities are
 handled by a pluggable :mod:`gtsam_mpc.constraints` strategy
-(barrier / AL / slack).
+(barrier / AL / slack / SQP).
 """
 
 from __future__ import annotations
@@ -68,7 +68,8 @@ class BicycleMPC:
         v_bounds: Optional ``(min, max)`` speed limits.
         constraints: A :class:`ConstraintStrategy`. If ``None`` one is built from
             ``constraint_mode`` and the ``barrier_weight`` / ``al_*`` knobs.
-        constraint_mode: ``"barrier"`` (default), ``"al"`` or ``"slack"``.
+        constraint_mode: ``"barrier"`` (default), ``"al"``, ``"slack"`` or
+            ``"sqp"`` (hard constraints via GTSAM's constrained QP solver).
         safety_radius: Keep-out radius around each obstacle.
         obstacle_weight: Barrier precision for keep-out (barrier mode).
         max_iterations: Max Levenberg-Marquardt iterations per (inner) solve.

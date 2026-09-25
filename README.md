@@ -32,7 +32,7 @@ Estimation, control and tracking are all MAP inference on factor graphs built fr
 
 | Component | Problem |
 | --------- | ------- |
-| `BicycleMPC` | nonlinear bicycle MPC; barrier / aug-Lagrangian / slack constraints |
+| `BicycleMPC` | nonlinear bicycle MPC; barrier / aug-Lagrangian / slack / **SQP (hard)** constraints |
 | `MovingHorizonEstimator` | sliding-window localization |
 | `JointEstimatorMPC` | localization + control, one graph |
 
@@ -42,10 +42,12 @@ mpc = BicycleMPC(BicycleModel(2.5, 0.1), Q=..., R=..., horizon=25, constraint_mo
 u = mpc.control(x0, goal)            # or mpc.simulate / a (horizon+1,4) reference + obstacles=
 ```
 
+`constraint_mode="sqp"` uses GTSAM 4.3's constrained QP solver (`gtsam.QpProblem` + `gtsam.LinearConstraint`): each SQP step turns the hard dynamics into linear equalities and input / speed / keep-out bounds into linear inequalities, so the bounds hold exactly instead of up to a penalty slack. Degenerate or infeasible QPs fall back to `gtsam.AugmentedLagrangianOptimizer`. It is slower than the penalty modes (~0.2 s per step at horizon 20).
+
 ## Install
 
 ```bash
-pip install -e ".[sim]"   # core + pygame; [dev] for pytest, [plot] for matplotlib
+pip install -e ".[sim]"   # core (GTSAM >= 4.3) + pygame; [dev] for pytest, [plot] for matplotlib
 ```
 
 ## Demos
@@ -65,7 +67,7 @@ Record the demo to a GIF: `python examples/make_gif.py out.gif --frames 300`.
 ## Test
 
 ```bash
-pytest   # 28 tests
+pytest   # 30 tests
 ```
 
 ## License

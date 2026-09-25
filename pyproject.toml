@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "inuex35" }]
 keywords = ["mpc", "gtsam", "factor-graph", "optimal-control", "lqr", "robotics"]
 dependencies = [
-    "gtsam>=4.2",
+    "gtsam>=4.3",
     "numpy>=1.21",
 ]
 
